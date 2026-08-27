@@ -1,5 +1,6 @@
 import type { XiangqiReviewPoint } from '@/games/xiangqi/ai/review'
 import type { XiangqiReviewWorkerRequest, XiangqiReviewWorkerResponse } from '@/games/xiangqi/ai/review.worker'
+import { cloneXiangqiMove } from '@/games/xiangqi/core/history'
 import type { XiangqiBoard, XiangqiMove, XiangqiSide } from '@/games/xiangqi/types/xiangqi'
 
 let id = 0
@@ -15,6 +16,12 @@ export function analyzeXiangqiReviewInWorker(initialBoard: XiangqiBoard, moves: 
       if (event.data.ok) resolve(event.data.points)
       else reject(new Error(event.data.error))
     })
-    worker.postMessage({ id: requestId, initialBoard, moves, humanSide } satisfies XiangqiReviewWorkerRequest)
+    const request: XiangqiReviewWorkerRequest = {
+      id: requestId,
+      initialBoard: initialBoard.map((row) => row.map((piece) => piece ? { ...piece } : null)),
+      moves: moves.map(cloneXiangqiMove),
+      humanSide,
+    }
+    worker.postMessage(request)
   })
 }

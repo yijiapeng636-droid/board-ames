@@ -1,21 +1,13 @@
 import { SEARCH_CONFIG } from '@/games/gomoku/ai/searchConfig'
+import {
+  analyzeThreat,
+  type ThreatDirectionPattern,
+  type ThreatPatternName,
+} from '@/games/gomoku/ai/threatAnalysis'
 import { BOARD_SIZE, type AICandidate, type Board, type Player } from '@/games/gomoku/types/gomoku'
 
-const DIRECTIONS = [
-  [0, 1],
-  [1, 0],
-  [1, 1],
-  [1, -1],
-] as const
-
-export type PatternName =
-  'five' | 'openFour' | 'closedFour' | 'openThree' | 'closedThree' | 'openTwo'
-
-export interface DirectionPattern {
-  pattern: PatternName | null
-  length: number
-  openEnds: number
-}
+export type PatternName = ThreatPatternName
+export type DirectionPattern = Pick<ThreatDirectionPattern, 'pattern' | 'length' | 'openEnds'>
 
 const PATTERN_SCORES: Record<PatternName, number> = {
   five: 1_000_000,
@@ -26,35 +18,6 @@ const PATTERN_SCORES: Record<PatternName, number> = {
   openTwo: 400,
 }
 
-function scan(
-  board: Board,
-  row: number,
-  col: number,
-  rowStep: number,
-  colStep: number,
-  player: Player,
-) {
-  let length = 0
-  let currentRow = row + rowStep
-  let currentCol = col + colStep
-  while (board[currentRow]?.[currentCol] === player) {
-    length += 1
-    currentRow += rowStep
-    currentCol += colStep
-  }
-  return { length, open: board[currentRow]?.[currentCol] === 0 }
-}
-
-function classifyPattern(length: number, openEnds: number): PatternName | null {
-  if (length >= 5) return 'five'
-  if (length === 4 && openEnds === 2) return 'openFour'
-  if (length === 4 && openEnds === 1) return 'closedFour'
-  if (length === 3 && openEnds === 2) return 'openThree'
-  if (length === 3 && openEnds === 1) return 'closedThree'
-  if (length === 2 && openEnds === 2) return 'openTwo'
-  return null
-}
-
 export function analyzeMovePatterns(
   board: Board,
   row: number,
@@ -62,13 +25,11 @@ export function analyzeMovePatterns(
   player: Player,
 ): DirectionPattern[] {
   if (board[row]?.[col] !== 0) return []
-  return DIRECTIONS.map(([rowStep, colStep]) => {
-    const forward = scan(board, row, col, rowStep, colStep, player)
-    const backward = scan(board, row, col, -rowStep, -colStep, player)
-    const length = forward.length + backward.length + 1
-    const openEnds = Number(forward.open) + Number(backward.open)
-    return { pattern: classifyPattern(length, openEnds), length, openEnds }
-  })
+  return analyzeThreat(board, { row, col }, player).directions.map(({ pattern, length, openEnds }) => ({
+    pattern,
+    length,
+    openEnds,
+  }))
 }
 
 function summarizePatterns(patterns: DirectionPattern[]) {
@@ -119,12 +80,14 @@ export function evaluateCandidate(
   player: Player,
 ): AICandidate {
   const opponent: Player = player === 1 ? 2 : 1
-  const attack = summarizePatterns(analyzeMovePatterns(board, row, col, player))
-  const defense = summarizePatterns(analyzeMovePatterns(board, row, col, opponent))
+  const attackThreat = analyzeThreat(board, { row, col }, player)
+  const defenseThreat = analyzeThreat(board, { row, col }, opponent)
+  const attack = summarizePatterns(attackThreat.directions)
+  const defense = summarizePatterns(defenseThreat.directions)
   const features = new Set<string>(attack.names)
   for (const name of defense.names) features.add(`block${name[0]!.toUpperCase()}${name.slice(1)}`)
-  if (attack.doubleThreat) features.add('doubleThreat')
-  if (attack.fourThree) features.add('fourThree')
+  if (attackThreat.doubleThreat) features.add('doubleThreat')
+  if (attackThreat.fourThree) features.add('fourThree')
 
   let adjacentPieces = 0
   for (let rowStep = -1; rowStep <= 1; rowStep += 1) {
@@ -136,16 +99,16 @@ export function evaluateCandidate(
   const centerBonus = 14 - (Math.abs(row - 7) + Math.abs(col - 7))
   const positionalScore = adjacentPieces * 25 + centerBonus
   let orderingScore = attack.score + defense.score * 1.15 + positionalScore
-  if (attack.doubleThreat) orderingScore += 120_000
-  if (attack.fourThree) orderingScore += 180_000
-  if (attack.names.includes('five')) orderingScore += 2_000_000
-  else if (defense.names.includes('five')) orderingScore += 1_500_000
+  if (attackThreat.doubleThreat) orderingScore += 120_000
+  if (attackThreat.fourThree) orderingScore += 180_000
+  if (attackThreat.winNow) orderingScore += 2_000_000
+  else if (defenseThreat.winNow) orderingScore += 1_500_000
   if (features.size === 0) features.add('positional')
-  const immediateWin = attack.names.includes('five')
-  const blocksImmediateWin = defense.names.includes('five')
-  const createsDoubleThreat = attack.doubleThreat
-  const createsFourThree = attack.fourThree
-  const forcesReply = immediateWin || attack.names.some((name) => name === 'openFour' || name === 'closedFour')
+  const immediateWin = attackThreat.winNow
+  const blocksImmediateWin = defenseThreat.winNow
+  const createsDoubleThreat = attackThreat.doubleThreat
+  const createsFourThree = attackThreat.fourThree
+  const forcesReply = immediateWin || attackThreat.fours.length > 0
   const pureDefense =
     blocksImmediateWin &&
     !immediateWin &&
@@ -216,8 +179,8 @@ export function generateCandidates(board: Board, limit: number = 10): AICandidat
 
 export function getForcedCandidate(candidates: AICandidate[]): AICandidate | null {
   return (
-    candidates.find((candidate) => candidate.features.includes('five')) ??
-    candidates.find((candidate) => candidate.features.includes('blockFive')) ??
+    candidates.find((candidate) => candidate.immediateWin) ??
+    candidates.find((candidate) => candidate.blocksImmediateWin) ??
     null
   )
 }

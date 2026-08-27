@@ -1,81 +1,16 @@
 import { serializeXiangqiBoard } from '@/games/xiangqi/core/board'
-import { applyXiangqiMove, generateLegalMoves, isInCheck, isSquareAttacked } from '@/games/xiangqi/core/legalMoves'
 import type {
   XiangqiAdjudication,
   XiangqiBoard,
-  XiangqiMove,
   XiangqiMoveClassification,
-  XiangqiMoveEffect,
   XiangqiPositionHistoryEntry,
   XiangqiSide,
 } from '@/games/xiangqi/types/xiangqi'
 
+export { classifyXiangqiMove } from '@/games/xiangqi/rules/classification'
+
 export function createPositionKey(board: XiangqiBoard, sideToMove: XiangqiSide): string {
   return `${serializeXiangqiBoard(board)}|turn:${sideToMove}`
-}
-
-export function classifyXiangqiMove(board: XiangqiBoard, move: XiangqiMove): XiangqiMoveClassification {
-  const next = applyXiangqiMove(board, move)
-  const opponent: XiangqiSide = move.side === 'red' ? 'black' : 'red'
-  const effects = new Set<XiangqiMoveEffect>()
-  const targets: string[] = []
-  const evidence: string[] = []
-
-  if (isInCheck(next, opponent)) {
-    effects.add('check')
-    evidence.push('走子后直接攻击对方将帅')
-  }
-  if (move.captured) {
-    effects.add('capture')
-    targets.push(move.captured.id)
-    evidence.push(`吃子:${move.captured.id}`)
-  }
-  for (let row = 0; row < next.length; row += 1) {
-    for (let col = 0; col < (next[row]?.length ?? 0); col += 1) {
-      const target = next[row]?.[col]
-      if (!target || target.side !== opponent || target.type === 'general') continue
-      if (isSquareAttacked(next, { row, col }, move.side)) targets.push(target.id)
-    }
-  }
-  if (targets.length > 0) {
-    effects.add('capture')
-    evidence.push(`走子后形成攻击:${[...new Set(targets)].join(',')}`)
-  }
-  const movedPieceAttacked = isSquareAttacked(next, move.to, opponent)
-  if (movedPieceAttacked && targets.length > 0) {
-    effects.add('exchange')
-    evidence.push('走动棋子与目标互相接触')
-  } else if (movedPieceAttacked) {
-    effects.add('sacrifice')
-    evidence.push('走动棋子进入对方攻击范围')
-  }
-  const mateThreat = generateLegalMoves(next, move.side).some((candidate) => {
-    const afterThreat = applyXiangqiMove(next, candidate)
-    return isInCheck(afterThreat, opponent) && generateLegalMoves(afterThreat, opponent).length === 0
-  })
-  if (mateThreat) {
-    effects.add('kill')
-    evidence.push('下一着存在将死威胁')
-  }
-  if (effects.size === 0) effects.add('idle')
-
-  const ordered: XiangqiMoveEffect[] = ['check', 'kill', 'capture', 'exchange', 'sacrifice', 'block', 'idle']
-  const effectList = ordered.filter((effect) => effects.has(effect))
-  const primaryEffect = effectList.includes('check')
-    ? 'check'
-    : effectList.includes('kill')
-      ? 'kill'
-      : effectList.includes('capture')
-        ? 'capture'
-        : effectList[0] ?? 'idle'
-  return {
-    side: move.side,
-    effects: effectList,
-    primaryEffect,
-    targetPieceIds: [...new Set(targets)],
-    ruleReference: primaryEffect === 'check' ? '24.1' : primaryEffect === 'kill' ? '24.2' : primaryEffect === 'capture' ? '24.3,26.4' : '24.4-24.8',
-    evidence,
-  }
 }
 
 export function findRepetitionCycle(history: XiangqiPositionHistoryEntry[]) {
@@ -87,10 +22,56 @@ export function findRepetitionCycle(history: XiangqiPositionHistoryEntry[]) {
   return { start, end: history.length - 1, entries: history.slice(start + 1) }
 }
 
-function isForbidden(classifications: XiangqiMoveClassification[]): boolean {
-  return classifications.length > 0 && classifications.every((item) =>
-    ['check', 'kill', 'capture'].includes(item.primaryEffect),
-  )
+interface CycleProfile {
+  forbidden: boolean
+  allCheck: boolean
+  allKill: boolean
+  checkKill: boolean
+  chaseRook: boolean
+  chaseUnprotected: boolean
+  jointChaseRook: boolean
+  jointChaseUnprotected: boolean
+}
+
+function profile(classifications: XiangqiMoveClassification[]): CycleProfile {
+  const all = (effects: string[]) => classifications.length > 0
+    && classifications.every((item) => effects.includes(item.primaryEffect) && item.forbidden !== false)
+  const chase = classifications.flatMap((item) => item.chaseEvidence ?? [])
+  const allChase = all(['capture']) && chase.length > 0
+  return {
+    forbidden: all(['check', 'kill', 'capture']),
+    allCheck: all(['check']),
+    allKill: all(['kill']),
+    checkKill: all(['check', 'kill'])
+      && classifications.some((item) => item.primaryEffect === 'check')
+      && classifications.some((item) => item.primaryEffect === 'kill'),
+    chaseRook: allChase && chase.every((item) => item.targetPieceType === 'rook' && !item.joint),
+    chaseUnprotected: allChase && chase.every((item) => !item.protected && !item.joint),
+    jointChaseRook: allChase && chase.every((item) => item.targetPieceType === 'rook' && item.joint),
+    jointChaseUnprotected: allChase && chase.every((item) => !item.protected && item.joint),
+  }
+}
+
+function createRuling(
+  verdict: XiangqiAdjudication['verdict'],
+  responsibleSide: XiangqiSide | null,
+  reason: string,
+  ruleReference: string,
+  cycle: { start: number; end: number },
+): XiangqiAdjudication {
+  return { verdict, responsibleSide, reason, ruleReference, cycleStart: cycle.start, cycleEnd: cycle.end }
+}
+
+function bothForbiddenResponsibleSide(red: CycleProfile, black: CycleProfile): XiangqiSide | null {
+  if (red.chaseRook && black.jointChaseRook) return 'red'
+  if (black.chaseRook && red.jointChaseRook) return 'black'
+  if (red.chaseUnprotected && black.jointChaseUnprotected) return 'red'
+  if (black.chaseUnprotected && red.jointChaseUnprotected) return 'black'
+
+  const redSpecific = red.allKill || red.checkKill || red.chaseRook || red.chaseUnprotected
+  const blackSpecific = black.allKill || black.checkKill || black.chaseRook || black.chaseUnprotected
+  if (redSpecific !== blackSpecific) return redSpecific ? 'red' : 'black'
+  return null
 }
 
 export function adjudicateRepetition(
@@ -98,16 +79,35 @@ export function adjudicateRepetition(
   mustChangeSide: XiangqiSide | null = null,
 ): XiangqiAdjudication {
   const cycle = findRepetitionCycle(history)
-  if (!cycle) return { verdict: 'none', responsibleSide: null, reason: '尚未形成三次循环', ruleReference: '24.9-24.14', cycleStart: null, cycleEnd: null }
-  const red = cycle.entries.flatMap((entry) => entry.classification?.side === 'red' ? [entry.classification] : [])
-  const black = cycle.entries.flatMap((entry) => entry.classification?.side === 'black' ? [entry.classification] : [])
-  const redForbidden = isForbidden(red)
-  const blackForbidden = isForbidden(black)
-  let responsibleSide: XiangqiSide | null = null
-  if (redForbidden !== blackForbidden) responsibleSide = redForbidden ? 'red' : 'black'
-  if (mustChangeSide && responsibleSide === mustChangeSide) {
-    return { verdict: 'loss', responsibleSide, reason: '已被要求变着后继续禁止循环', ruleReference: '4.1.5,25.3', cycleStart: cycle.start, cycleEnd: cycle.end }
+  if (!cycle) {
+    return { verdict: 'none', responsibleSide: null, reason: '尚未形成三次循环', ruleReference: '24.9-24.14', cycleStart: null, cycleEnd: null }
   }
-  if (responsibleSide) return { verdict: 'mustChange', responsibleSide, reason: '单方形成禁止着法循环', ruleReference: '25.1-25.3,26.9', cycleStart: cycle.start, cycleEnd: cycle.end }
-  return { verdict: 'draw', responsibleSide: null, reason: '双方责任相同，不变作和', ruleReference: '25.2,26.9.4', cycleStart: cycle.start, cycleEnd: cycle.end }
+  const red = profile(cycle.entries.flatMap((entry) => entry.classification?.side === 'red' ? [entry.classification] : []))
+  const black = profile(cycle.entries.flatMap((entry) => entry.classification?.side === 'black' ? [entry.classification] : []))
+
+  let responsibleSide: XiangqiSide | null = null
+  let ruleReference = '25.2,26.9.4'
+  let reason = '双方均为允许着法或禁止着法责任相同，不变作和'
+
+  if (red.allCheck !== black.allCheck) {
+    responsibleSide = red.allCheck ? 'red' : 'black'
+    ruleReference = '25.1'
+    reason = '任何情况下均不允许单方面长将'
+  } else if (red.forbidden !== black.forbidden) {
+    responsibleSide = red.forbidden ? 'red' : 'black'
+    ruleReference = '25.3'
+    reason = '一方为禁止着法、另一方为允许着法，禁止着法方必须变着'
+  } else if (red.forbidden && black.forbidden) {
+    responsibleSide = bothForbiddenResponsibleSide(red, black)
+    if (responsibleSide) {
+      ruleReference = '26.9.1-26.9.3'
+      reason = '双方均为禁止着法，按长杀、长捉车、长捉无根子及联合捉责任比较变着'
+    }
+  }
+
+  if (mustChangeSide && responsibleSide === mustChangeSide) {
+    return createRuling('loss', responsibleSide, '已被要求变着后仍继续同一禁止着法循环', '4.1.5,25.1,25.3,26.9', cycle)
+  }
+  if (responsibleSide) return createRuling('mustChange', responsibleSide, reason, ruleReference, cycle)
+  return createRuling('draw', null, reason, ruleReference, cycle)
 }

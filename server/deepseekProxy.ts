@@ -30,6 +30,19 @@ interface AgentTool {
   function: { name: string; description: string; parameters: Record<string, unknown> }
 }
 
+export function buildAgentUpstreamBody(model: string, request: ReturnType<typeof parseAgentPayload>) {
+  return {
+    model,
+    messages: request.messages,
+    response_format: { type: 'json_object' },
+    ...(request.finalJsonOnly ? { tool_choice: 'none' } : { tools: request.tools ?? [], tool_choice: 'auto' }),
+    thinking: { type: 'disabled' },
+    temperature: 0.2,
+    max_tokens: 700,
+    stream: false,
+  }
+}
+
 function sendJson(response: ServerResponse, status: number, body: unknown) {
   response.statusCode = status
   response.setHeader('Content-Type', 'application/json; charset=utf-8')
@@ -100,14 +113,7 @@ async function forwardAgent(response: ServerResponse, options: Required<ProxyOpt
   const upstream = await fetch(completionEndpoint(options.baseUrl), {
     method: 'POST',
     headers: { Authorization: `Bearer ${options.apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: options.model,
-      messages: request.messages,
-      ...(request.finalJsonOnly ? { response_format: { type: 'json_object' } } : { tools: request.tools ?? [], tool_choice: 'auto' }),
-      thinking: { type: 'disabled' },
-      max_tokens: 700,
-      stream: false,
-    }),
+    body: JSON.stringify(buildAgentUpstreamBody(options.model, request)),
     signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
   })
   if (!upstream.ok) {

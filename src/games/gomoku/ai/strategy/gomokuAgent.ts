@@ -19,8 +19,17 @@ const chineseEvidence = (value: string) => {
 
 export function parseGomokuDecision(content: string): GomokuStrategyDecision {
   let value: unknown
-  try { value = JSON.parse(content) }
-  catch { throw new AgentRuntimeError('invalid_final_json') }
+  const trimmed = content.replace(/^\uFEFF/u, '').trim()
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/iu)
+  const jsonText = fenced?.[1]?.trim() ?? trimmed
+  try { value = JSON.parse(jsonText) }
+  catch {
+    const preview = trimmed.slice(0, 120).replace(/\s+/gu, ' ')
+    throw new AgentRuntimeError(
+      'invalid_final_json',
+      `响应长度 ${trimmed.length}，开头为：${preview || '[空]'}`,
+    )
+  }
   if (!isRecord(value) || typeof value.status !== 'string') throw new AgentRuntimeError('invalid_final_status')
   if (value.status === 'fallback_required') throw new AgentRuntimeError('fallback_requested')
   if (value.status !== 'decision') throw new AgentRuntimeError('invalid_final_status')
@@ -53,7 +62,7 @@ export async function runGomokuStrategyAgent(context: GomokuAgentContext, signal
     context,
     messages: [
       { role: 'system', content: `你是五子棋决策 Agent。思考模式已关闭，本地事实、搜索工具和战术门禁具有最高权威。所有面向玩家的 reason 和 evidence 内容必须使用简体中文；JSON 字段名及 strategy 枚举保持协议规定的英文。\n\n${runtimeSkill}\n\n${gomokuSkill}` },
-      { role: 'user', content: `从允许候选中选择一个落点。只在存在尚未解决的问题时调用工具。最终只返回协议规定的 Decision 或 Fallback JSON，并确保 reason、evidence 使用简体中文。\n${buildPositionMessage(context)}` },
+      { role: 'user', content: `从允许候选中选择一个落点。只在存在尚未解决的问题时调用工具。最终只返回紧凑的 Decision 或 Fallback JSON，并确保 reason、evidence 使用简体中文。不要复述棋盘、候选列表、PV 或分析过程；reason 不超过 60 个汉字，evidence 最多 3 项。\n${buildPositionMessage(context)}` },
     ],
     tools: gomokuStrategyTools, transport, budget: GOMOKU_AGENT_BUDGET, signal, isContextCurrent,
     parseFinal: parseGomokuDecision, validateFinal: validateDecision,

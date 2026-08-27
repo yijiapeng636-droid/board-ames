@@ -1,6 +1,7 @@
-import { generateCandidatePool, getForcedCandidate } from '@/games/gomoku/ai/candidates'
+import { evaluateCandidate, generateCandidatePool, getForcedCandidate } from '@/games/gomoku/ai/candidates'
 import { evaluatePosition } from '@/games/gomoku/ai/evaluation'
 import { SEARCH_CONFIG, SEARCH_WIN_SCORE } from '@/games/gomoku/ai/searchConfig'
+import { findWinningMoves } from '@/games/gomoku/ai/threatAnalysis'
 import { searchForcedWin } from '@/games/gomoku/ai/threatSearch'
 import { applyTTBound, classifyTTBound, type TTEntry } from '@/games/gomoku/ai/transposition'
 import { isBoardFull } from '@/games/gomoku/core/game'
@@ -160,11 +161,21 @@ function finishForced(candidate: AICandidate, type: NonNullable<ForcedMoveType>,
   return { candidates, forcedMoveType: type, metrics, trace: traceFor(rootPlayer, pool, metrics, type, candidates, type === 'forcedWin' ? 'immediateWin' : 'forcedBlock') }
 }
 
+function findImmediateForcedCandidate(board: Board, rootPlayer: Player): AICandidate | null {
+  const winningMove = findWinningMoves(board, rootPlayer)[0]
+  if (winningMove) return evaluateCandidate(board, winningMove.row, winningMove.col, rootPlayer)
+
+  const blockingMove = findWinningMoves(board, other(rootPlayer))[0]
+  return blockingMove
+    ? evaluateCandidate(board, blockingMove.row, blockingMove.col, rootPlayer)
+    : null
+}
+
 export function createSafeSearchFallback(board: Board, rootPlayer: Player = 2): SearchResult {
   const started = Date.now()
   const pool = generateCandidatePool(board, rootPlayer)
   const metrics = metricsFor(pool.length)
-  const forced = getForcedCandidate(pool)
+  const forced = findImmediateForcedCandidate(board, rootPlayer) ?? getForcedCandidate(pool)
   if (forced?.immediateWin) return finishForced(forced, 'forcedWin', rootPlayer, pool, metrics, started)
   if (forced?.blocksImmediateWin) return finishForced(forced, 'forcedBlock', rootPlayer, pool, metrics, started)
   const candidates = pool.slice(0, SEARCH_CONFIG.finalCandidateLimit).map((item) => asSearched(item, rootPlayer))
@@ -179,7 +190,7 @@ export function searchPosition(boardInput: Board, options: SearchOptions = {}): 
   const board = cloneBoard(boardInput)
   const pool = generateCandidatePool(board, rootPlayer, options.candidatePoolLimit ?? SEARCH_CONFIG.candidatePoolLimit)
   const metrics = metricsFor(pool.length)
-  const immediate = getForcedCandidate(pool)
+  const immediate = findImmediateForcedCandidate(board, rootPlayer) ?? getForcedCandidate(pool)
   if (immediate?.immediateWin) return finishForced(immediate, 'forcedWin', rootPlayer, pool, metrics, started)
   if (immediate?.blocksImmediateWin) return finishForced(immediate, 'forcedBlock', rootPlayer, pool, metrics, started)
 

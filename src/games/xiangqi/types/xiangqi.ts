@@ -24,9 +24,11 @@ export interface XiangqiMove {
   to: XiangqiPosition
   piece: XiangqiPiece
   captured: XiangqiPiece | null
+  /** Bonus turns can keep the same side to move, so replay cannot infer this field. */
+  nextSideToMove?: XiangqiSide
 }
 
-export type XiangqiMoveOption = Omit<XiangqiMove, 'turn'>
+export type XiangqiMoveOption = Omit<XiangqiMove, 'turn' | 'nextSideToMove'>
 
 export type XiangqiTerminalReason =
   | 'generalCaptured'
@@ -56,6 +58,17 @@ export interface XiangqiReplayState {
 export type XiangqiMoveEffect = 'check' | 'kill' | 'capture' | 'exchange' | 'sacrifice' | 'block' | 'idle'
 export type XiangqiPrimaryEffect = XiangqiMoveEffect
 
+export interface XiangqiChaseEvidence {
+  targetPieceId: string
+  targetPieceType: XiangqiPieceType
+  attackerPieceIds: string[]
+  direct: boolean
+  joint: boolean
+  protected: boolean
+  netGain: number
+  immediateMateRisk: boolean
+}
+
 export interface XiangqiMoveClassification {
   side: XiangqiSide
   effects: XiangqiMoveEffect[]
@@ -63,6 +76,8 @@ export interface XiangqiMoveClassification {
   targetPieceIds: string[]
   ruleReference: string
   evidence: string[]
+  chaseEvidence: XiangqiChaseEvidence[]
+  forbidden: boolean
 }
 
 export interface XiangqiPositionHistoryEntry {

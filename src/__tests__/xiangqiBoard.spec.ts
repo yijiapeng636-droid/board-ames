@@ -62,6 +62,18 @@ describe('xiangqi board foundation', () => {
     expect(initial[6]![0]?.id).toBe(redPawn.id)
   })
 
+  it('reconstructs a bonus turn where the same side moves twice', () => {
+    const initial = createInitialXiangqiBoard()
+    const moves: XiangqiMove[] = [
+      { turn: 1, side: 'red', from: { row: 6, col: 0 }, to: { row: 5, col: 0 }, piece: initial[6]![0]!, captured: null, nextSideToMove: 'red' },
+      { turn: 2, side: 'red', from: { row: 6, col: 2 }, to: { row: 5, col: 2 }, piece: initial[6]![2]!, captured: null, nextSideToMove: 'black' },
+    ]
+    const replay = replayXiangqiHistory(initial, moves)
+    expect(replay.sideToMove).toBe('black')
+    expect(replay.board[5]![0]?.side).toBe('red')
+    expect(replay.board[5]![2]?.side).toBe('red')
+  })
+
   it('renders semantic buttons, selections, legal targets and last move markers', () => {
     const board = createInitialXiangqiBoard()
     const lastMove: XiangqiMove = {

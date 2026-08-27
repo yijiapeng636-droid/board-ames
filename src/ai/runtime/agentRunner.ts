@@ -8,7 +8,9 @@ export interface AgentRunnerOptions<TContext, TResult> {
   parseFinal(content: string): TResult; validateFinal(value: TResult, context: TContext): void
   fallback(reason: AgentFallbackReason, context: TContext): TResult
 }
-const FINAL_ONLY_MESSAGE = 'Tool call budget is closed. Return only the final structured JSON envelope from existing facts and tool results. Do not request tools.'
+const FINAL_ONLY_MESSAGE = '工具调用已经结束。只输出一个紧凑 JSON 对象，不得继续调用工具、不得复述棋盘或搜索过程。reason 不超过 60 个汉字，evidence 最多 3 项且每项不超过 40 个汉字。'
+const TOOL_BUDGET_FINAL_MESSAGE = '工具额度已经用完。请立即根据已有棋盘、本地搜索和工具结果输出一个紧凑的最终 JSON 对象。不得继续请求工具、不得复述分析过程。reason 不超过 60 个汉字，evidence 最多 3 项且每项不超过 40 个汉字。'
+const TRUNCATED_RECOVERY_MESSAGE = '上一次回答因过长被截断。现在只输出最终紧凑 JSON：保留 status、move.row、move.col、strategy、简短 reason 和最多 3 项 evidence；不得输出分析过程、棋盘、PV、Markdown 或工具调用。'
 function reasonFrom(error: unknown, defaultReason: AgentFallbackReason): AgentFallbackReason {
   if (error instanceof AgentRuntimeError) return error.code
   if (error instanceof DOMException && error.name === 'TimeoutError') return 'model_timeout'
@@ -30,6 +32,7 @@ export async function runAgent<TContext, TResult>(options: AgentRunnerOptions<TC
   let activeModelCall: number | undefined
   let activeToolName: string | undefined
   let activeFailureDetail: string | undefined
+  let finalInstruction: string | null = null
   const stale = () => !(options.isContextCurrent?.() ?? true)
   const abortReason = (): AgentFallbackReason => totalTimedOut ? 'agent_total_timeout' : options.signal?.aborted ? 'aborted' : stale() ? 'stale_session' : 'aborted'
   const finishFallback = (reason: AgentFallbackReason): AgentRunResult<TResult> => {
@@ -42,12 +45,14 @@ export async function runAgent<TContext, TResult>(options: AgentRunnerOptions<TC
     if (controller.signal.aborted || stale()) return finishFallback(abortReason())
     for (let round = 1; round <= options.budget.maxModelCalls; round += 1) {
       if (controller.signal.aborted || stale()) return finishFallback(abortReason())
-      const finalJsonOnly = round === options.budget.maxModelCalls
+      const toolBudgetExhausted = trace.toolCalls.length >= options.budget.maxToolCalls
+      const finalJsonOnly = finalInstruction !== null || toolBudgetExhausted || round === options.budget.maxModelCalls
+      const finalMessage = finalInstruction ?? (toolBudgetExhausted ? TOOL_BUDGET_FINAL_MESSAGE : FINAL_ONLY_MESSAGE)
       activeStage = 'model_request'; activeModelCall = round; activeToolName = undefined; activeFailureDetail = undefined
       const callStarted = Date.now()
       let response
       try {
-        response = await options.transport.complete({ messages: finalJsonOnly ? [...messages, { role: 'user', content: FINAL_ONLY_MESSAGE }] : messages, ...(finalJsonOnly ? {} : { tools: specs }), finalJsonOnly, signal: controller.signal })
+        response = await options.transport.complete({ messages: finalJsonOnly ? [...messages, { role: 'user', content: finalMessage }] : messages, ...(finalJsonOnly ? {} : { tools: specs }), finalJsonOnly, signal: controller.signal })
       } catch (error) {
         activeFailureDetail = error instanceof Error ? error.message : undefined
         if (controller.signal.aborted || stale()) { activeFailureDetail = undefined; return finishFallback(abortReason()) }
@@ -59,11 +64,24 @@ export async function runAgent<TContext, TResult>(options: AgentRunnerOptions<TC
       activeStage = 'model_response'
       trace.modelCalls.push({ round, durationMs: Date.now() - callStarted, finishReason: response.finishReason, toolCalls: calls.map((call) => call.function.name), hasContent: typeof response.message.content === 'string' && response.message.content.trim().length > 0 })
       if (controller.signal.aborted || stale()) return finishFallback(abortReason())
-      messages.push({ role: 'assistant', content: response.message.content, ...(calls.length ? { tool_calls: calls } : {}) })
       if (calls.length) {
+        if (finalJsonOnly) {
+          activeStage = 'model_response'
+          activeFailureDetail = `无工具最终轮仍返回 ${calls.length} 个 tool_calls`
+          return finishFallback('unexpected_final_tool_call')
+        }
+        const remainingToolCalls = Math.max(0, options.budget.maxToolCalls - trace.toolCalls.length)
+        if (calls.length > remainingToolCalls) {
+          if (round < options.budget.maxModelCalls) {
+            finalInstruction = TOOL_BUDGET_FINAL_MESSAGE
+            continue
+          }
+          activeStage = 'model_response'
+          activeFailureDetail = `模型请求 ${calls.length} 个工具，但仅剩 ${remainingToolCalls} 次额度`
+          return finishFallback('tool_budget_exceeded')
+        }
+        messages.push({ role: 'assistant', content: response.message.content, tool_calls: calls })
         activeStage = 'tool_validation'
-        if (finalJsonOnly) return finishFallback('round_budget_exceeded')
-        if (trace.toolCalls.length + calls.length > options.budget.maxToolCalls) return finishFallback('tool_budget_exceeded')
         for (const call of calls) {
           activeToolName = call.function.name
           if (controller.signal.aborted || stale()) return finishFallback(abortReason())
@@ -87,6 +105,15 @@ export async function runAgent<TContext, TResult>(options: AgentRunnerOptions<TC
           }
         }
         continue
+      }
+      messages.push({ role: 'assistant', content: response.message.content })
+      if (response.finishReason === 'length') {
+        if (!finalJsonOnly && round < options.budget.maxModelCalls) {
+          finalInstruction = TRUNCATED_RECOVERY_MESSAGE
+          continue
+        }
+        activeFailureDetail = 'finish_reason=length'
+        return finishFallback('model_response_truncated')
       }
       if (typeof response.message.content !== 'string' || !response.message.content.trim()) return finishFallback('empty_model_response')
       try {

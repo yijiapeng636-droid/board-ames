@@ -2,9 +2,37 @@ import { cloneXiangqiBoard, oppositeSide } from '@/games/xiangqi/core/board'
 import type {
   XiangqiBoard,
   XiangqiMove,
+  XiangqiPositionHistoryEntry,
   XiangqiReplayState,
   XiangqiSide,
 } from '@/games/xiangqi/types/xiangqi'
+
+export function cloneXiangqiMove(move: XiangqiMove): XiangqiMove {
+  return {
+    ...move,
+    from: { ...move.from },
+    to: { ...move.to },
+    piece: { ...move.piece },
+    captured: move.captured ? { ...move.captured } : null,
+  }
+}
+
+export function cloneXiangqiHistory(history: XiangqiPositionHistoryEntry[]): XiangqiPositionHistoryEntry[] {
+  return history.map((entry) => ({
+    ...entry,
+    move: entry.move ? cloneXiangqiMove(entry.move) : null,
+    classification: entry.classification ? {
+      ...entry.classification,
+      effects: [...entry.classification.effects],
+      targetPieceIds: [...entry.classification.targetPieceIds],
+      evidence: [...entry.classification.evidence],
+      chaseEvidence: entry.classification.chaseEvidence.map((item) => ({
+        ...item,
+        attackerPieceIds: [...item.attackerPieceIds],
+      })),
+    } : null,
+  }))
+}
 
 function samePiece(
   left: XiangqiBoard[number][number] | undefined,
@@ -37,7 +65,7 @@ export function replayXiangqiHistory(
     }
     board[move.from.row]![move.from.col] = null
     board[move.to.row]![move.to.col] = { ...move.piece }
-    sideToMove = oppositeSide(sideToMove)
+    sideToMove = move.nextSideToMove ?? oppositeSide(sideToMove)
   }
 
   return { board, sideToMove }

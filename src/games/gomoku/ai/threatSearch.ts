@@ -1,4 +1,9 @@
 import { generateCandidatePool } from '@/games/gomoku/ai/candidates'
+import {
+  analyzeThreat,
+  type ThreatAnalysis,
+  type ThreatPosition,
+} from '@/games/gomoku/ai/threatAnalysis'
 import { getWinner } from '@/games/gomoku/core/winner'
 import { BOARD_SIZE, type Board, type Player, type PrincipalVariationMove, type ThreatProofStatus } from '@/games/gomoku/types/gomoku'
 
@@ -7,7 +12,7 @@ export interface ThreatSearchResult {
   status: ThreatProofStatus
   found: boolean
   forcedWin: boolean
-  winningMove?: { row: number; col: number }
+  winningMove?: ThreatPosition
   plyToWin?: number
   principalVariation: PrincipalVariationMove[]
   searchedNodes: number
@@ -17,6 +22,14 @@ export interface ThreatSearchResult {
 
 function playerName(player: Player): 'black' | 'white' { return player === 1 ? 'black' : 'white' }
 function other(player: Player): Player { return player === 1 ? 2 : 1 }
+function same(left: ThreatPosition, right: ThreatPosition) { return left.row === right.row && left.col === right.col }
+function moveKey(move: ThreatPosition) { return `${move.row}:${move.col}` }
+
+function uniqueMoves(moves: ThreatPosition[]) {
+  const unique = new Map<string, ThreatPosition>()
+  for (const move of moves) unique.set(moveKey(move), move)
+  return [...unique.values()]
+}
 
 function proveThreat(
   board: Board,
@@ -24,6 +37,7 @@ function proveThreat(
   initialSide: Player,
   initialPly: number,
   options: ThreatSearchOptions,
+  initialThreat?: Pick<ThreatAnalysis, 'winningMoves' | 'defenseSquares'>,
 ) {
   const started = Date.now()
   const deadline = started + (options.maxMs ?? 220)
@@ -38,44 +52,112 @@ function proveThreat(
     return stop
   }
 
-  function prove(side: Player, ply: number): { win: boolean; line: PrincipalVariationMove[] } {
-    if (stopped() || ply >= maxPly) return { win: false, line: [] }
-    nodes += 1
-    const pool = generateCandidatePool(board, side, 20)
-    if (side === attacker) {
-      const forcing = pool.filter((move) => move.immediateWin || move.forcesReply || move.createsDoubleThreat || move.createsFourThree)
-      for (const move of forcing) {
-        board[move.row]![move.col] = side
-        const child = getWinner(board, move.row, move.col) === attacker
-          ? { win: true, line: [] }
-          : prove(other(side), ply + 1)
-        board[move.row]![move.col] = 0
-        if (child.win) return { win: true, line: [{ player: playerName(side), row: move.row, col: move.col }, ...child.line] }
-        if (stopped()) break
-      }
-      return { win: false, line: [] }
+  function proveAttacker(ply: number): { win: boolean; line: PrincipalVariationMove[] } {
+    const defender = other(attacker)
+    const attackerPool = generateCandidatePool(board, attacker, 24)
+    const immediateWins = attackerPool.filter((move) => move.immediateWin)
+    if (immediateWins[0]) {
+      const move = immediateWins[0]
+      return { win: true, line: [{ player: playerName(attacker), row: move.row, col: move.col }] }
     }
 
-    // A defender's own immediate win refutes the attack before any blocking line is considered.
-    if (pool.some((move) => move.immediateWin)) return { win: false, line: [] }
-    const attackerWins = generateCandidatePool(board, attacker, 20).filter((move) => move.immediateWin)
-    if (attackerWins.length === 0) return { win: false, line: [] }
-    const replies = pool.filter((move) => move.blocksImmediateWin)
-    if (replies.length === 0) return { win: true, line: [] }
+    const defenderWins = generateCandidatePool(board, defender, 24).filter((move) => move.immediateWin)
+    if (defenderWins.length > 1) return { win: false, line: [] }
+
+    const forcing = defenderWins.length === 1
+      ? attackerPool.filter((move) => same(move, defenderWins[0]!))
+      : attackerPool.filter((move) => {
+          if (move.immediateWin || move.forcesReply || move.createsDoubleThreat || move.createsFourThree) return true
+          return analyzeThreat(board, move, attacker).openThrees.length > 0
+        })
+
+    for (const move of forcing) {
+      board[move.row]![move.col] = attacker
+      const local = analyzeThreat(board, move, attacker)
+      const child = local.winNow
+        ? { win: true, line: [] }
+        : prove(defender, ply + 1, local)
+      board[move.row]![move.col] = 0
+      if (child.win) {
+        return {
+          win: true,
+          line: [{ player: playerName(attacker), row: move.row, col: move.col }, ...child.line],
+        }
+      }
+      if (stopped()) break
+    }
+    return { win: false, line: [] }
+  }
+
+  function proveDefender(ply: number, threat: Pick<ThreatAnalysis, 'winningMoves' | 'defenseSquares'> | undefined): { win: boolean; line: PrincipalVariationMove[] } {
+    if (!threat) return { win: false, line: [] }
+    const defender = other(attacker)
+    const defenderPool = generateCandidatePool(board, defender, 40)
+
+    // A defender that can win now refutes the attack instead of entering a blocking branch.
+    if (defenderPool.some((move) => move.immediateWin)) return { win: false, line: [] }
+
+    // One stone cannot cover two distinct immediate winning squares. Keep one
+    // representative block-and-win continuation so PV ends at an actual five.
+    if (threat.winningMoves.length > 1) {
+      const blocked = threat.winningMoves[0]!
+      const winning = threat.winningMoves[1]!
+      return {
+        win: true,
+        line: [
+          { player: playerName(defender), row: blocked.row, col: blocked.col },
+          { player: playerName(attacker), row: winning.row, col: winning.col },
+        ],
+      }
+    }
+
+    let replies: ThreatPosition[]
+    if (threat.winningMoves.length === 1) {
+      replies = [{ ...threat.winningMoves[0]! }]
+    } else {
+      const counterForcing = defenderPool.filter((move) =>
+        move.forcesReply || move.createsDoubleThreat || move.createsFourThree,
+      )
+      replies = uniqueMoves([
+        ...threat.defenseSquares,
+        ...counterForcing.map(({ row, col }) => ({ row, col })),
+      ])
+    }
+
+    replies = replies.filter((move) => board[move.row]?.[move.col] === 0)
+    if (replies.length === 0) return { win: false, line: [] }
+
     let representativeLine: PrincipalVariationMove[] = []
     for (const reply of replies) {
-      board[reply.row]![reply.col] = side
+      board[reply.row]![reply.col] = defender
+      if (getWinner(board, reply.row, reply.col) === defender) {
+        board[reply.row]![reply.col] = 0
+        return { win: false, line: [] }
+      }
       const child = prove(attacker, ply + 1)
       board[reply.row]![reply.col] = 0
-      // The proof is an AND node: every legal immediate defense must still lose.
+      // This is an AND node: every effective defense and forcing counter must still lose.
       if (!child.win || stopped()) return { win: false, line: [] }
-      const line = [{ player: playerName(side), row: reply.row, col: reply.col } as PrincipalVariationMove, ...child.line]
+      const line = [
+        { player: playerName(defender), row: reply.row, col: reply.col } as PrincipalVariationMove,
+        ...child.line,
+      ]
       if (line.length > representativeLine.length) representativeLine = line
     }
     return { win: true, line: representativeLine }
   }
 
-  const proof = prove(initialSide, initialPly)
+  function prove(
+    side: Player,
+    ply: number,
+    threat?: Pick<ThreatAnalysis, 'winningMoves' | 'defenseSquares'>,
+  ): { win: boolean; line: PrincipalVariationMove[] } {
+    if (stopped() || ply >= maxPly) return { win: false, line: [] }
+    nodes += 1
+    return side === attacker ? proveAttacker(ply) : proveDefender(ply, threat)
+  }
+
+  const proof = prove(initialSide, initialPly, initialThreat)
   return { proof, nodes, timedOut, durationMs: Date.now() - started }
 }
 
@@ -108,7 +190,7 @@ export function searchForcedWin(boardInput: Board, attacker: Player, options: Th
 export function searchForcedWinFromMove(
   boardInput: Board,
   attacker: Player,
-  move: { row: number; col: number },
+  move: ThreatPosition,
   options: ThreatSearchOptions = {},
 ): ThreatSearchResult {
   if (!Number.isInteger(move.row) || !Number.isInteger(move.col) || move.row < 0 || move.row >= BOARD_SIZE || move.col < 0 || move.col >= BOARD_SIZE) throw new Error('指定强制胜候选坐标无效')
@@ -117,10 +199,11 @@ export function searchForcedWinFromMove(
   const board = boardInput.map((line) => [...line])
   board[move.row]![move.col] = attacker
   const root: PrincipalVariationMove = { player: playerName(attacker), row: move.row, col: move.col }
-  if (getWinner(board, move.row, move.col) === attacker) {
+  const analysis = analyzeThreat(board, move, attacker)
+  if (analysis.winNow) {
     return { status: 'proven_win', found: true, forcedWin: true, winningMove: { ...move }, plyToWin: 1, principalVariation: [root], searchedNodes: 0, durationMs: Date.now() - started, timedOut: false }
   }
-  const result = proveThreat(board, attacker, other(attacker), 1, options)
+  const result = proveThreat(board, attacker, other(attacker), 1, options, analysis)
   const normalized = asResult(result.proof, result.nodes, result.timedOut, Date.now() - started)
   if (!normalized.forcedWin) return normalized
   const line = [root, ...normalized.principalVariation]

@@ -1,5 +1,6 @@
 import type { XiangqiSearchOptions, XiangqiSearchResult } from '@/games/xiangqi/ai/search'
 import type { XiangqiSearchWorkerRequest, XiangqiSearchWorkerResponse } from '@/games/xiangqi/ai/search.worker'
+import { cloneXiangqiHistory } from '@/games/xiangqi/core/history'
 import type { XiangqiBoard, XiangqiSide } from '@/games/xiangqi/types/xiangqi'
 
 let requestId = 0
@@ -16,6 +17,17 @@ export function searchXiangqiInWorker(board: XiangqiBoard, side: XiangqiSide, op
       else reject(new Error(event.data.error))
     })
     worker.addEventListener('error', (event) => { finish(); reject(new Error(event.message)) }, { once: true })
-    worker.postMessage({ id, board, side, options } satisfies XiangqiSearchWorkerRequest)
+    const request: XiangqiSearchWorkerRequest = {
+      id,
+      board: board.map((row) => row.map((piece) => piece ? { ...piece } : null)),
+      side,
+      options: {
+        maxDepth: options.maxDepth,
+        timeBudgetMs: options.timeBudgetMs,
+        positionHistory: options.positionHistory ? cloneXiangqiHistory(options.positionHistory) : undefined,
+        mustChangeSide: options.mustChangeSide,
+      },
+    }
+    worker.postMessage(request)
   })
 }

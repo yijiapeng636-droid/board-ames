@@ -33,15 +33,62 @@ describe('generic agent runtime', () => {
     const requests = vi.mocked(mock.complete).mock.calls.map(([request]) => request)
     expect(requests[3]).toMatchObject({ finalJsonOnly: true }); expect(requests[3]!.tools).toBeUndefined()
   })
+  it('switches to a final-only round as soon as the tool budget is exhausted', async () => {
+    const mock = transport(call('compare_candidates'), response('{"value":7}'))
+    const result = await runAgent({ ...options(mock), budget: { ...budget, maxToolCalls: 1 } })
+    expect(result.source).toBe('agent')
+    const finalRequest = vi.mocked(mock.complete).mock.calls[1]![0]
+    expect(finalRequest.finalJsonOnly).toBe(true)
+    expect(finalRequest.tools).toBeUndefined()
+    expect(finalRequest.messages[finalRequest.messages.length - 1]?.content).toContain('工具额度已经用完')
+  })
+  it('recovers from parallel tool calls that exceed the remaining budget', async () => {
+    const parallelCalls: AgentTransportResponse = {
+      message: {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          { id: 'compare', type: 'function', function: { name: 'compare_candidates', arguments: '{}' } },
+          { id: 'deep', type: 'function', function: { name: 'search_candidate', arguments: '{}' } },
+        ],
+      },
+      finishReason: 'tool_calls',
+    }
+    const mock = transport(parallelCalls, response('{"value":7}'))
+    const result = await runAgent({ ...options(mock), budget: { ...budget, maxToolCalls: 1 } })
+    expect(result.source).toBe('agent')
+    expect(result.trace.toolCalls).toHaveLength(0)
+    expect(vi.mocked(mock.complete).mock.calls[1]![0]).toMatchObject({ finalJsonOnly: true })
+  })
   it('does not retry invalid JSON on the reserved final call', async () => {
     const mock = transport(call('compare_candidates'), call('search_candidate'), call('compare_candidates'), response('not-json'))
     const result = await runAgent(options(mock)); expect(result.trace.fallbackReason).toBe('invalid_final_json'); expect(mock.complete).toHaveBeenCalledTimes(4)
   })
-  it('classifies round and tool budgets', async () => {
+  it('repairs one truncated response with a compact final-only call inside the budget', async () => {
+    const mock = transport(
+      { message: { role: 'assistant', content: '{"value":' }, finishReason: 'length' },
+      response('{"value":7}'),
+    )
+    const result = await runAgent(options(mock))
+    expect(result.source).toBe('agent')
+    expect(result.trace.modelCalls.map((item) => item.finishReason)).toEqual(['length', 'stop'])
+    const repairRequest = vi.mocked(mock.complete).mock.calls[1]![0]
+    expect(repairRequest.finalJsonOnly).toBe(true)
+    expect(repairRequest.tools).toBeUndefined()
+    expect(repairRequest.messages[repairRequest.messages.length - 1]?.content).toContain('上一次回答因过长被截断')
+  })
+  it('falls back without a third attempt when the compact repair is also truncated', async () => {
+    const truncated: AgentTransportResponse = { message: { role: 'assistant', content: '{"value":' }, finishReason: 'length' }
+    const mock = transport(truncated, truncated)
+    const result = await runAgent(options(mock))
+    expect(result.trace.fallbackReason).toBe('model_response_truncated')
+    expect(result.trace.failure).toMatchObject({ stage: 'model_response', modelCall: 2, detail: 'finish_reason=length' })
+    expect(mock.complete).toHaveBeenCalledTimes(2)
+  })
+  it('reports a model protocol violation when a final-only round still requests tools', async () => {
     const round = await runAgent({ ...options(transport(call('compare_candidates'))), budget: { ...budget, maxModelCalls: 1 } })
-    expect(round.trace.fallbackReason).toBe('round_budget_exceeded')
-    const tools = await runAgent({ ...options(transport(call('compare_candidates'))), budget: { ...budget, maxToolCalls: 0 } })
-    expect(tools.trace.fallbackReason).toBe('tool_budget_exceeded')
+    expect(round.trace.fallbackReason).toBe('unexpected_final_tool_call')
+    expect(round.trace.failure).toMatchObject({ stage: 'model_response', modelCall: 1 })
   })
   it('distinguishes total, model and tool timeouts', async () => {
     const pending: AgentTransport = { complete: ({ signal }) => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true })) }

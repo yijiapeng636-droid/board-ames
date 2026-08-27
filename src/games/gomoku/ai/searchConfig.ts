@@ -8,7 +8,7 @@ export const SEARCH_CONFIG = {
   maxDepth: 3,
   maxMs: 1_200,
   threatMaxPly: 9,
-  threatMaxMs: 220,
+  threatMaxMs: 600,
   extensionDepth: 2,
   maxExtensionNodes: 5_000,
   sessionGameLimit: 20,

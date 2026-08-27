@@ -20,7 +20,7 @@ const fixtures: Fixture[] = [
   { name: 'immediate-win-white', purpose: '规则已证明的一步五连必须越过 Agent', root: 2, pieces: [[7, 3, 2], [7, 4, 2], [7, 5, 2], [7, 6, 2]], expected: 'win' },
   { name: 'mandatory-block-black-ai', purpose: '黑方 AI 无己方立即胜时必须阻挡白方五连', root: 1, pieces: [[5, 8, 2], [6, 8, 2], [7, 8, 2], [8, 8, 2]], expected: 'block' },
   { name: 'forcing-attack-over-development', purpose: '己方开放三连的强制进攻不应让位于对手普通发展点', root: 2, pieces: [[7, 5, 2], [7, 6, 2], [7, 7, 2], [4, 4, 1], [4, 5, 1]], expected: 'tactical' },
-  { name: 'double-threat-center', purpose: '交叉双活三候选应作为受保护战术候选进入搜索', root: 2, pieces: [[7, 5, 2], [7, 6, 2], [5, 7, 2], [6, 7, 2], [10, 10, 1]], expected: 'search' },
+  { name: 'double-threat-center', purpose: '交叉双活三经全防守分支证明后必须升级为强制战术', root: 2, pieces: [[7, 5, 2], [7, 6, 2], [5, 7, 2], [6, 7, 2], [10, 10, 1]], expected: 'tactical' },
   { name: 'static-trap', purpose: '深层结果必须独立于 orderingScore 排名', root: 2, pieces: [[5, 5, 2], [5, 6, 2], [7, 5, 1], [7, 6, 1], [6, 7, 2], [8, 7, 1], [9, 8, 2], [6, 8, 1]], expected: 'search' },
   { name: 'black-perspective', purpose: '同一搜索实现支持黑方主动进攻', root: 1, pieces: [[8, 4, 1], [8, 5, 1], [8, 6, 1], [3, 3, 2]], expected: 'tactical' },
   { name: 'white-perspective', purpose: '同一搜索实现支持白方主动进攻', root: 2, pieces: [[9, 4, 2], [9, 5, 2], [9, 6, 2], [3, 3, 1]], expected: 'tactical' },

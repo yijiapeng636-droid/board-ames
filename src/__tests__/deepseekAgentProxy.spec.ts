@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseAgentPayload } from '../../server/deepseekProxy'
+import { buildAgentUpstreamBody, parseAgentPayload } from '../../server/deepseekProxy'
 
 describe('DeepSeek agent proxy protocol', () => {
   it('keeps assistant tool_calls and matching tool messages for stateless replay', () => {
@@ -21,5 +21,13 @@ describe('DeepSeek agent proxy protocol', () => {
 
   it('accepts a final JSON-only round without tools', () => {
     expect(parseAgentPayload({ messages: [{ role: 'user', content: 'final' }], finalJsonOnly: true })).toEqual({ messages: [{ role: 'user', content: 'final' }], finalJsonOnly: true })
+  })
+
+  it('enables JSON output for both tool-capable and final rounds', () => {
+    const toolRound = parseAgentPayload({ messages: [{ role: 'user', content: 'JSON' }], tools: [], finalJsonOnly: false })
+    const finalRound = parseAgentPayload({ messages: [{ role: 'user', content: 'JSON' }], finalJsonOnly: true })
+    expect(buildAgentUpstreamBody('deepseek-v4-flash', toolRound)).toMatchObject({ response_format: { type: 'json_object' }, tool_choice: 'auto', temperature: 0.2 })
+    expect(buildAgentUpstreamBody('deepseek-v4-flash', finalRound)).toMatchObject({ response_format: { type: 'json_object' }, tool_choice: 'none' })
+    expect(buildAgentUpstreamBody('deepseek-v4-flash', finalRound)).not.toHaveProperty('tools')
   })
 })

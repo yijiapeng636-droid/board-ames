@@ -22,6 +22,10 @@ describe('Gomoku strategy agent final protocol', () => {
     const result = await runGomokuStrategyAgent(context, undefined, undefined, model(envelope(7, 7)))
     expect(result.source).toBe('agent'); expect(result.decision).toMatchObject({ row: 7, col: 7 })
   })
+  it('accepts one JSON envelope wrapped in a Markdown code fence or BOM', () => {
+    const json = envelope(7, 7, { reason: '选择中心落点', evidence: ['本地搜索'] })
+    expect(parseGomokuDecision(`\uFEFF\n\`\`\`json\n${json}\n\`\`\``)).toMatchObject({ row: 7, col: 7 })
+  })
   it('normalizes soft metadata without discarding a valid move', () => {
     expect(parseGomokuDecision(envelope(7, 7, { strategy: 'attack', reason: null, evidence: {} }))).toEqual({ row: 7, col: 7, strategy: 'positional', reason: '', evidence: [] })
   })
@@ -40,6 +44,21 @@ describe('Gomoku strategy agent final protocol', () => {
     const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const result = await runGomokuStrategyAgent(buildGomokuAgentContext(createBoard(), [], 1, 2, 1, baseline), undefined, undefined, model(content))
     expect(result.source).toBe('fallback'); expect(result.trace.fallbackReason).toBe(reason); expect(warning).toHaveBeenCalledWith('[GomokuAgent fallback]', result.trace)
+  })
+
+  it('records a safe response preview when JSON parsing fails', async () => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const result = await runGomokuStrategyAgent(
+      buildGomokuAgentContext(createBoard(), [], 1, 2, 1, baseline),
+      undefined,
+      undefined,
+      model('我建议选择中心点'),
+    )
+    expect(result.trace.failure).toMatchObject({
+      stage: 'final_parse',
+      detail: expect.stringContaining('我建议选择中心点'),
+    })
+    expect(warning).toHaveBeenCalledOnce()
   })
 })
 

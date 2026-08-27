@@ -1,18 +1,21 @@
 <script setup lang="ts">
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
 import XiangqiBoard from '@/games/xiangqi/components/XiangqiBoard.vue'
 import { requestXiangqiMove, requestXiangqiReview } from '@/games/xiangqi/ai/deepseek'
 import { searchXiangqiInWorker } from '@/games/xiangqi/ai/searchClient'
 import { analyzeXiangqiReviewInWorker } from '@/games/xiangqi/ai/reviewClient'
 import { loadXiangqiSessionExperience, saveXiangqiSessionExperience } from '@/games/xiangqi/ai/sessionExperience'
 import { cloneXiangqiBoard, createInitialXiangqiBoard, oppositeSide } from '@/games/xiangqi/core/board'
+import { cloneXiangqiHistory, cloneXiangqiMove } from '@/games/xiangqi/core/history'
 import {
   applyXiangqiMove,
   findGeneral,
   generateLegalMoves,
 } from '@/games/xiangqi/core/legalMoves'
 import { getXiangqiGameStatus } from '@/games/xiangqi/core/result'
-import { adjudicateRepetition, classifyXiangqiMove, createPositionKey } from '@/games/xiangqi/core/repetition'
+import { adjudicateRepetition, createPositionKey } from '@/games/xiangqi/core/repetition'
+import { formatXiangqiMove } from '@/games/xiangqi/core/notation'
+import { classifyXiangqiMove } from '@/games/xiangqi/rules/classification'
 import type {
   XiangqiAdjudication,
   XiangqiBoard as XiangqiBoardState,
@@ -41,7 +44,9 @@ const adjudication = ref<XiangqiAdjudication | null>(null)
 const mustChangeSide = ref<XiangqiSide | null>(null)
 const checkpoints = ref<Array<{ board: XiangqiBoardState; moves: XiangqiMove[]; sideToMove: XiangqiSide; bonus: Record<XiangqiSide, number>; history: XiangqiPositionHistoryEntry[]; adjudication: XiangqiAdjudication | null; mustChangeSide: XiangqiSide | null }>>([])
 let sessionId = 0
-let controller: AbortController | null = null
+let moveController: AbortController | null = null
+let hintController: AbortController | null = null
+let reviewController: AbortController | null = null
 const lastMove = computed(() => moves.value[moves.value.length - 1] ?? null)
 const status = computed(() => getXiangqiGameStatus(board.value, sideToMove.value))
 const effectiveResult = computed(() => adjudication.value?.verdict === 'loss' ? (adjudication.value.responsibleSide === 'red' ? 'blackWin' : 'redWin') : adjudication.value?.verdict === 'draw' ? 'draw' : status.value.result)
@@ -79,10 +84,19 @@ function handleSelect(position: XiangqiPosition) {
   completeMove({ ...legalMove, turn: moves.value.length + 1 }, '玩家走子')
 }
 
-function abortTasks() { controller?.abort(); controller = null; sessionId += 1; busy.value = false }
+function abortTasks() {
+  moveController?.abort()
+  hintController?.abort()
+  reviewController?.abort()
+  moveController = null
+  hintController = null
+  reviewController = null
+  sessionId += 1
+  busy.value = false
+}
 
 function saveCheckpoint() {
-  checkpoints.value.push({ board: cloneXiangqiBoard(board.value), moves: moves.value.map((move) => ({ ...move, from: { ...move.from }, to: { ...move.to }, piece: { ...move.piece }, captured: move.captured ? { ...move.captured } : null })), sideToMove: sideToMove.value, bonus: { ...bonus.value }, history: history.value.map((entry) => ({ ...entry })), adjudication: adjudication.value ? { ...adjudication.value } : null, mustChangeSide: mustChangeSide.value })
+  checkpoints.value.push({ board: cloneXiangqiBoard(board.value), moves: moves.value.map(cloneXiangqiMove), sideToMove: sideToMove.value, bonus: { ...bonus.value }, history: cloneXiangqiHistory(history.value), adjudication: adjudication.value ? { ...adjudication.value } : null, mustChangeSide: mustChangeSide.value })
 }
 
 function initializeHistory() {
@@ -95,12 +109,13 @@ function startGame(aiSide: XiangqiSide) {
   started.value = true
   choosingSide.value = false
   message.value = `玩家执${humanSide.value === 'red' ? '红' : '黑'}，红方先行。`
-  saveCheckpoint()
-  if (sideToMove.value !== humanSide.value) void nextTick(runAI)
+  if (sideToMove.value === humanSide.value) saveCheckpoint()
+  else void nextTick(runAI)
 }
 
 function resetGame() {
   abortTasks()
+  started.value = false
   board.value = createInitialXiangqiBoard()
   sideToMove.value = 'red'
   moves.value = []
@@ -125,25 +140,40 @@ function finishExperience() {
 
 function completeMove(move: XiangqiMove, reason: string) {
   const before = board.value
-  board.value = applyXiangqiMove(before, move)
-  moves.value.push(move)
-  const nextSide = oppositeSide(move.side)
+  const nextBoard = applyXiangqiMove(before, move)
+  const normalNextSide = oppositeSide(move.side)
+  const after = getXiangqiGameStatus(nextBoard, normalNextSide)
+  let nextSide = normalNextSide
+  if (!after.result && !after.inCheck && bonus.value[move.side] > 0) {
+    bonus.value[move.side] -= 1
+    nextSide = move.side
+  } else if (after.inCheck) {
+    bonus.value[move.side] = 0
+  }
+  const completedMove: XiangqiMove = { ...cloneXiangqiMove(move), nextSideToMove: nextSide }
+  board.value = nextBoard
+  moves.value.push(completedMove)
   const classification = classifyXiangqiMove(before, move)
-  history.value.push({ key: createPositionKey(board.value, nextSide), sideToMove: nextSide, move, classification })
+  history.value.push({ key: createPositionKey(board.value, nextSide), sideToMove: nextSide, move: completedMove, classification })
+
+  if (after.result) {
+    sideToMove.value = nextSide
+    message.value = reason
+    finishExperience()
+    return
+  }
+
   const ruling = adjudicateRepetition(history.value, mustChangeSide.value)
   adjudication.value = ruling.verdict === 'none' ? null : ruling
   if (ruling.verdict === 'mustChange') mustChangeSide.value = ruling.responsibleSide
   else if (ruling.verdict === 'none' && mustChangeSide.value === move.side) mustChangeSide.value = null
-  const after = getXiangqiGameStatus(board.value, nextSide)
-  if (after.result || ruling.verdict === 'loss' || ruling.verdict === 'draw') {
+  if (ruling.verdict === 'loss' || ruling.verdict === 'draw') {
     sideToMove.value = nextSide
-    message.value = ruling.verdict === 'none' ? reason : ruling.reason
+    message.value = ruling.reason
     finishExperience()
     return
   }
-  if (after.inCheck) bonus.value[move.side] = 0
-  if (!after.inCheck && bonus.value[move.side] > 0) bonus.value[move.side] -= 1
-  else sideToMove.value = nextSide
+  sideToMove.value = nextSide
   message.value = `${reason}；${classification.primaryEffect}`
   clearSelection(); hintMove.value = null
   if (sideToMove.value === humanSide.value) saveCheckpoint()
@@ -153,47 +183,82 @@ function completeMove(move: XiangqiMove, reason: string) {
 async function runAI() {
   if (!started.value || effectiveResult.value || sideToMove.value === humanSide.value) return
   const currentSession = sessionId
-  controller = new AbortController(); busy.value = true; message.value = 'AI 正在搜索…'
+  const taskController = new AbortController()
+  moveController = taskController
+  busy.value = true; message.value = 'AI 正在搜索…'
   try {
-    const result = await searchXiangqiInWorker(board.value, sideToMove.value, { maxDepth: 3, timeBudgetMs: 900, positionHistory: history.value.map((entry) => entry.key) }, controller.signal)
+    const result = await searchXiangqiInWorker(board.value, sideToMove.value, { maxDepth: 3, timeBudgetMs: 900, positionHistory: history.value, mustChangeSide: mustChangeSide.value }, taskController.signal)
     if (currentSession !== sessionId || result.candidates.length === 0) return
     let chosen = result.candidates[0]!
     let reason = `本地搜索深度 ${result.depth}，${result.nodes} 节点`
     try {
-      const selected = await requestXiangqiMove(board.value, moves.value, sideToMove.value, result.candidates.slice(0, 6), loadXiangqiSessionExperience(), controller.signal)
+      const selected = await requestXiangqiMove(board.value, moves.value, sideToMove.value, result.candidates.slice(0, 6), loadXiangqiSessionExperience(), taskController.signal)
       chosen = selected.move; reason = selected.reason
     } catch { reason += '；DeepSeek不可用，采用最高分合法候选' }
     if (currentSession === sessionId) completeMove({ ...chosen, turn: moves.value.length + 1 }, reason)
   } catch (error) { if (currentSession === sessionId && !(error instanceof DOMException && error.name === 'AbortError')) message.value = error instanceof Error ? error.message : 'AI搜索失败' }
-  finally { if (currentSession === sessionId) busy.value = false }
+  finally {
+    if (currentSession === sessionId && moveController === taskController) {
+      moveController = null
+      busy.value = false
+    }
+  }
 }
 
 async function showHint() {
   if (!started.value || busy.value || effectiveResult.value || sideToMove.value !== humanSide.value) return
-  const snapshot = createPositionKey(board.value, sideToMove.value); busy.value = true
+  const currentSession = sessionId
+  const snapshot = createPositionKey(board.value, sideToMove.value)
+  const taskController = new AbortController()
+  hintController = taskController
+  busy.value = true
   try {
-    const result = await searchXiangqiInWorker(board.value, sideToMove.value, { maxDepth: 3, timeBudgetMs: 700, positionHistory: history.value.map((entry) => entry.key) })
-    if (snapshot === createPositionKey(board.value, sideToMove.value) && result.candidates[0]) { hintMove.value = result.candidates[0]; message.value = `提示：第${result.candidates[0].from.row + 1}行${result.candidates[0].from.col + 1}列 → 第${result.candidates[0].to.row + 1}行${result.candidates[0].to.col + 1}列` }
-  } finally { busy.value = false }
+    const result = await searchXiangqiInWorker(board.value, sideToMove.value, { maxDepth: 3, timeBudgetMs: 700, positionHistory: history.value, mustChangeSide: mustChangeSide.value }, taskController.signal)
+    if (currentSession === sessionId && snapshot === createPositionKey(board.value, sideToMove.value) && result.candidates[0]) {
+      hintMove.value = result.candidates[0]
+      message.value = `提示：${formatXiangqiMove(result.candidates[0])}`
+    }
+  } catch (error) {
+    if (currentSession === sessionId && !(error instanceof DOMException && error.name === 'AbortError')) message.value = error instanceof Error ? error.message : '提示搜索失败'
+  } finally {
+    if (currentSession === sessionId && hintController === taskController) {
+      hintController = null
+      busy.value = false
+    }
+  }
 }
 
 function undo() {
   if (checkpoints.value.length < 2) return
   abortTasks(); checkpoints.value.pop(); const point = checkpoints.value[checkpoints.value.length - 1]!
-  board.value = cloneXiangqiBoard(point.board); moves.value = point.moves.map((move) => ({ ...move })); sideToMove.value = point.sideToMove; bonus.value = { ...point.bonus }; history.value = point.history.map((entry) => ({ ...entry })); adjudication.value = point.adjudication ? { ...point.adjudication } : null; mustChangeSide.value = point.mustChangeSide; clearSelection(); hintMove.value = null; review.value = null; message.value = '已回到上一个稳定决策点。'
+  board.value = cloneXiangqiBoard(point.board); moves.value = point.moves.map(cloneXiangqiMove); sideToMove.value = point.sideToMove; bonus.value = { ...point.bonus }; history.value = cloneXiangqiHistory(point.history); adjudication.value = point.adjudication ? { ...point.adjudication } : null; mustChangeSide.value = point.mustChangeSide; clearSelection(); hintMove.value = null; review.value = null; message.value = '已回到上一个稳定决策点。'
+  if (sideToMove.value !== humanSide.value && !effectiveResult.value) void nextTick(runAI)
 }
 
 function grantBonus(side: XiangqiSide) { if (started.value && !effectiveResult.value && bonus.value[side] === 0) bonus.value[side] = 1 }
 
 async function runReview() {
   if (!effectiveResult.value) return
+  const currentSession = sessionId
+  const taskController = new AbortController()
+  reviewController = taskController
   busy.value = true
-  try { const points = await analyzeXiangqiReviewInWorker(createInitialXiangqiBoard(), moves.value, humanSide.value); review.value = await requestXiangqiReview({ result: effectiveResult.value, moves: moves.value, points, adjudication: adjudication.value, localFactsOnly: true }) }
-  catch { review.value = { summary: 'AI复盘不可用，本地关键点仍然有效。', suggestions: ['复查被将军后的应将选择', '比较提示着法与实战着法'] } }
-  finally { busy.value = false }
+  try {
+    const points = await analyzeXiangqiReviewInWorker(createInitialXiangqiBoard(), moves.value, humanSide.value, taskController.signal)
+    const result = await requestXiangqiReview({ result: effectiveResult.value, moves: moves.value, points, adjudication: adjudication.value, localFactsOnly: true }, taskController.signal)
+    if (currentSession === sessionId) review.value = result
+  } catch (error) {
+    if (currentSession === sessionId && !(error instanceof DOMException && error.name === 'AbortError')) review.value = { summary: 'AI复盘不可用，本地关键点仍然有效。', suggestions: ['复查被将军后的应将选择', '比较提示着法与实战着法'] }
+  } finally {
+    if (currentSession === sessionId && reviewController === taskController) {
+      reviewController = null
+      busy.value = false
+    }
+  }
 }
 
 initializeHistory()
+onBeforeUnmount(abortTasks)
 </script>
 
 <template>

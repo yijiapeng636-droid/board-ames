@@ -28,4 +28,4 @@ Stop Rules：已有 immediate win 时不调用工具；mandatory defense 只有�
 无法可靠决策时只允许以下 Fallback JSON：
 `{"status":"fallback_required","reason":"证据不足"}`
 
-禁止顶层 `row/col`、裸字符串 `fallback_required`、Markdown 或额外文本。`status` 与 `move.row/move.col` 必须正确；strategy、reason、evidence 仅为解释元数据。所有面向玩家的 `reason` 和 `evidence` 文本必须使用简体中文，JSON 字段名和 strategy 枚举仍按协议使用英文。
+禁止顶层 `row/col`、裸字符串 `fallback_required`、Markdown 或额外文本。`status` 与 `move.row/move.col` 必须正确；strategy、reason、evidence 仅为解释元数据。所有面向玩家的 `reason` 和 `evidence` 文本必须使用简体中文，JSON 字段名和 strategy 枚举仍按协议使用英文。不得复述棋盘、候选列表、PV 或完整分析过程；`reason` 不超过 60 个汉字，`evidence` 最多 3 项且每项不超过 40 个汉字。

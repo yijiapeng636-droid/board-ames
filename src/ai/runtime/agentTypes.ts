@@ -11,7 +11,9 @@ export interface AgentBudget { maxModelCalls: number; maxToolCalls: number; tota
 export type AgentFallbackReason =
   | 'model_request_failed' | 'model_timeout' | 'agent_total_timeout' | 'round_budget_exceeded'
   | 'tool_budget_exceeded' | 'tool_timeout' | 'unknown_tool' | 'invalid_tool_args'
+  | 'unexpected_final_tool_call'
   | 'tool_execution_failed' | 'empty_model_response' | 'invalid_final_json' | 'invalid_final_status'
+  | 'model_response_truncated'
   | 'invalid_final_move' | 'move_outside_candidate_set' | 'mandatory_defense_violation'
   | 'forced_result_violation' | 'stale_session' | 'aborted' | 'fallback_requested' | 'orchestration_failed'
 export type AgentFailureStage =

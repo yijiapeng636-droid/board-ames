@@ -5,7 +5,24 @@ import { requestXiangqiMove } from '@/games/xiangqi/ai/deepseek'
 import { XIANGQI_SESSION_EXPERIENCE_KEY, loadXiangqiSessionExperience, saveXiangqiSessionExperience } from '@/games/xiangqi/ai/sessionExperience'
 import { searchXiangqi } from '@/games/xiangqi/ai/search'
 import { createInitialXiangqiBoard } from '@/games/xiangqi/core/board'
+import { generateLegalMoves } from '@/games/xiangqi/core/legalMoves'
 import { formatXiangqiMove } from '@/games/xiangqi/core/notation'
+import type { XiangqiBoard, XiangqiSide } from '@/games/xiangqi/types/xiangqi'
+
+class ImmediateSearchWorker {
+  private messageListener?: (event: MessageEvent) => void
+
+  addEventListener(type: string, listener: EventListenerOrEventListenerObject) {
+    if (type === 'message') this.messageListener = listener as (event: MessageEvent) => void
+  }
+
+  terminate() {}
+
+  postMessage(request: { id: number; board: XiangqiBoard; side: XiangqiSide }) {
+    const move = generateLegalMoves(request.board, request.side)[0]!
+    queueMicrotask(() => this.messageListener?.({ data: { id: request.id, ok: true, result: { candidates: [{ ...move, score: 0, depth: 1, principalVariation: [move] }], depth: 1, nodes: 1, elapsedMs: 1, aborted: false } } } as MessageEvent))
+  }
+}
 
 afterEach(() => { vi.unstubAllGlobals(); sessionStorage.clear() })
 
@@ -33,5 +50,15 @@ describe('xiangqi training flow', () => {
     const candidates = searchXiangqi(createInitialXiangqiBoard(), 'red', { maxDepth: 1, timeBudgetMs: 500 }).candidates.slice(0, 2)
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ from: { row: 4, col: 4 }, to: { row: 4, col: 5 }, reason: 'invalid' }) }))
     await expect(requestXiangqiMove(createInitialXiangqiBoard(), [], 'red', candidates, null)).rejects.toThrow('候选列表之外')
+  })
+
+  it('does not expose an undo checkpoint that restores AI red before its opening move', async () => {
+    vi.stubGlobal('Worker', ImmediateSearchWorker)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ from: { row: 4, col: 4 }, to: { row: 4, col: 5 }, reason: 'invalid' }) }))
+    const wrapper = mount(XiangqiGame)
+    await wrapper.findAll('button').find((button) => button.text() === '开始对局')!.trigger('click')
+    await wrapper.findAll('[role="dialog"] button')[0]!.trigger('click')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('黑方行棋'))
+    expect(wrapper.findAll('button').find((button) => button.text() === '悔棋')!.attributes('disabled')).toBeDefined()
   })
 })
