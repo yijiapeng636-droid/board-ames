@@ -1,7 +1,7 @@
-import { SEARCH_CONFIG } from '@/games/gomoku/ai/searchConfig'
 import type {
   Board,
   GameResult,
+  GomokuAIDiagnostic,
   Move,
   Player,
   PositionExperienceSummary,
@@ -15,6 +15,309 @@ export const SESSION_EXPERIENCE_KEY = 'gomoku:session-experience:v2'
 export type AIDecisionSource =
   'forcedWin' | 'forcedBlock' | 'forcedTactical' | 'deepseek' | 'searchFallback'
 
+export interface GameHistoryMove extends Move {
+  id: string
+  occurredAt?: number
+  phase: string
+  revertedAt?: number
+  revertReason?: string
+}
+
+export interface GameAnomaly {
+  id: string
+  occurredAt: number
+  subsystem: string
+  stage: string
+  code: string
+  message: string
+  fingerprint: string
+  moveNumber?: number
+  recoverable: boolean
+  fallbackAction?: string
+  unexpected: boolean
+}
+
+export interface GameAnomalyInput {
+  subsystem: string
+  stage: string
+  code: string
+  message: string
+  moveNumber?: number
+  recoverable: boolean
+  fallbackAction?: string
+}
+
+export interface HistoricalAnomalySummary {
+  advisory: true
+  groups: Array<{ fingerprint: string; count: number; lastSeenAt: number; lessons: string[] }>
+  examples: GameAnomaly[]
+}
+
+export interface GameAnomalyReview {
+  summary: string
+  anomalyIds: string[]
+  lessons: string[]
+  followUps: string[]
+}
+
+export type GameAnomalyRetrospective =
+  | { status: 'pending' }
+  | ({ status: 'completed' } & GameAnomalyReview)
+  | { status: 'failed'; error: string; retryable: true }
+
+export interface GameHistoryRecord {
+  id: string
+  schemaVersion: 1
+  status: 'active' | 'completed' | 'interrupted'
+  startedAt: number
+  finishedAt?: number
+  interruptionReason?: string
+  result?: Exclude<GameResult, null>
+  humanPlayer: Player
+  aiPlayer: Player
+  boardSize: number
+  legacy?: true
+  incomplete?: true
+  moves: GameHistoryMove[]
+  aiDecisions: AIDecisionRecord[]
+  aiDiagnostics: GomokuAIDiagnostic[]
+  anomalies: GameAnomaly[]
+  reviewSummary?: ReviewSummary
+  retrospective?: GameAnomalyRetrospective
+}
+
+export interface GameHistoryStorage {
+  load(): Promise<GameHistoryRecord[]>
+  save(records: GameHistoryRecord[]): Promise<void>
+}
+
+interface GameHistoryServiceOptions {
+  storage: GameHistoryStorage
+  now?: () => number
+  id?: () => string
+  reviewAnomalies?: (game: GameHistoryRecord) => Promise<GameAnomalyReview>
+}
+
+export function createGameHistoryService({
+  storage,
+  now = Date.now,
+  id = () => crypto.randomUUID(),
+  reviewAnomalies,
+}: GameHistoryServiceOptions) {
+  let games: GameHistoryRecord[] = []
+  let writes = Promise.resolve()
+
+  const sanitize = (message: string) =>
+    message
+      .slice(0, 240)
+      .replace(/Authorization:\s*Bearer\s+\S+/giu, '[redacted]')
+      .replace(/\bsk-[\w-]+/giu, '[redacted]')
+
+  const persist = () => {
+    const snapshot = structuredClone(games)
+    writes = writes.then(() => storage.save(snapshot)).catch(() => undefined)
+  }
+
+  const scheduleRetrospective = (game: GameHistoryRecord) => {
+    if (!reviewAnomalies || game.anomalies.length === 0 || game.retrospective) return
+    game.retrospective = { status: 'pending' }
+    persist()
+    writes = writes.then(async () => {
+      try {
+        const review = await reviewAnomalies(structuredClone(game))
+        const validIds = new Set(game.anomalies.map((anomaly) => anomaly.id))
+        if (!review.anomalyIds.every((anomalyId) => validIds.has(anomalyId))) {
+          throw new Error('Anomaly review referenced an unknown anomaly')
+        }
+        game.retrospective = {
+          status: 'completed',
+          summary: sanitize(review.summary),
+          anomalyIds: [...new Set(review.anomalyIds)],
+          lessons: review.lessons.slice(0, 6).map(sanitize),
+          followUps: review.followUps.slice(0, 6).map(sanitize),
+        }
+      } catch (error) {
+        game.retrospective = {
+          status: 'failed',
+          error: sanitize(error instanceof Error ? error.message : 'Anomaly review failed'),
+          retryable: true,
+        }
+      }
+      await storage.save(structuredClone(games)).catch(() => undefined)
+    })
+  }
+
+  return {
+    async load() {
+      let recovered = false
+      const loadedGames = structuredClone(await storage.load()).map((game) => {
+        if (game.status === 'active') recovered = true
+        return {
+          ...game,
+          status: game.status === 'active' ? ('interrupted' as const) : game.status,
+          ...(game.status === 'active' ? { interruptionReason: 'page-reload' } : {}),
+          aiDecisions: game.aiDecisions ?? [],
+          aiDiagnostics: game.aiDiagnostics ?? [],
+          anomalies: game.anomalies ?? [],
+        }
+      })
+      games = [
+        ...new Map([...loadedGames, ...games].map((game) => [game.id, game])).values(),
+      ]
+      if (recovered) persist()
+    },
+    startGame(input: { humanPlayer: Player; aiPlayer: Player }) {
+      const gameId = id()
+      games.push({
+        id: gameId,
+        schemaVersion: 1,
+        status: 'active',
+        startedAt: now(),
+        humanPlayer: input.humanPlayer,
+        aiPlayer: input.aiPlayer,
+        boardSize: 15,
+        moves: [],
+        aiDecisions: [],
+        aiDiagnostics: [],
+        anomalies: [],
+      })
+      persist()
+      return gameId
+    },
+    recordMove(gameId: string, move: Move & { phase: string }) {
+      const game = games.find((candidate) => candidate.id === gameId)
+      if (!game || game.status !== 'active') return
+      game.moves.push({
+        ...move,
+        id: `${gameId}:move:${game.moves.length + 1}`,
+        occurredAt: now(),
+      })
+      persist()
+    },
+    recordAIDecision(gameId: string, decision: AIDecisionRecord) {
+      const game = games.find((candidate) => candidate.id === gameId)
+      if (!game || game.status !== 'active') return
+      game.aiDecisions.push(structuredClone(decision))
+      persist()
+    },
+    recordAIDiagnostic(gameId: string, diagnostic: GomokuAIDiagnostic) {
+      const game = games.find((candidate) => candidate.id === gameId)
+      if (!game || game.status !== 'active') return
+      game.aiDiagnostics.push({
+        ...structuredClone(diagnostic),
+        ...(diagnostic.fallbackMessage
+          ? { fallbackMessage: sanitize(diagnostic.fallbackMessage) }
+          : {}),
+        ...(diagnostic.failureDetail ? { failureDetail: sanitize(diagnostic.failureDetail) } : {}),
+      })
+      persist()
+    },
+    saveReviewSummary(gameId: string, summary: ReviewSummary) {
+      const game = games.find((candidate) => candidate.id === gameId)
+      if (!game) return
+      game.reviewSummary = structuredClone(summary)
+      persist()
+    },
+    recordAnomaly(gameId: string, input: GameAnomalyInput) {
+      const game = games.find((candidate) => candidate.id === gameId)
+      if (!game) return
+      game.anomalies.push({
+        ...input,
+        id: `${gameId}:anomaly:${game.anomalies.length + 1}`,
+        occurredAt: now(),
+        message: sanitize(input.message),
+        fingerprint: `${input.subsystem}:${input.stage}:${input.code}`,
+        unexpected: true,
+      })
+      persist()
+      if (game.status !== 'active') scheduleRetrospective(game)
+    },
+    queryAnomalies(
+      input: { subsystem?: string; stage?: string; fingerprint?: string; limit?: number } = {},
+    ): HistoricalAnomalySummary {
+      const limit = Math.max(1, Math.min(input.limit ?? 5, 10))
+      const matches = games
+        .flatMap((game) =>
+          game.anomalies.map((anomaly) => ({
+            anomaly,
+            lessons: game.retrospective?.status === 'completed' ? game.retrospective.lessons : [],
+          })),
+        )
+        .filter(
+          ({ anomaly }) =>
+            (!input.subsystem || anomaly.subsystem === input.subsystem) &&
+            (!input.stage || anomaly.stage === input.stage) &&
+            (!input.fingerprint || anomaly.fingerprint === input.fingerprint),
+        )
+      const grouped = new Map<
+        string,
+        { fingerprint: string; count: number; lastSeenAt: number; lessons: string[] }
+      >()
+      for (const { anomaly, lessons } of matches) {
+        const group = grouped.get(anomaly.fingerprint) ?? {
+          fingerprint: anomaly.fingerprint,
+          count: 0,
+          lastSeenAt: 0,
+          lessons: [],
+        }
+        group.count += 1
+        group.lastSeenAt = Math.max(group.lastSeenAt, anomaly.occurredAt)
+        group.lessons = [...new Set([...group.lessons, ...lessons])].slice(0, 6)
+        grouped.set(anomaly.fingerprint, group)
+      }
+      return structuredClone({
+        advisory: true as const,
+        groups: [...grouped.values()]
+          .sort(
+            (left, right) =>
+              right.count - left.count ||
+              right.lastSeenAt - left.lastSeenAt ||
+              left.fingerprint.localeCompare(right.fingerprint),
+          )
+          .slice(0, limit),
+        examples: matches
+          .map(({ anomaly }) => anomaly)
+          .sort(
+            (left, right) => right.occurredAt - left.occurredAt || left.id.localeCompare(right.id),
+          )
+          .slice(0, limit),
+      })
+    },
+    revertMovesAfter(gameId: string, activeMoveCount: number, reason: string) {
+      const game = games.find((candidate) => candidate.id === gameId)
+      if (!game || game.status !== 'active') return
+      const revertedAt = now()
+      for (const move of game.moves
+        .filter((candidate) => !candidate.revertedAt)
+        .slice(activeMoveCount)) {
+        move.revertedAt = revertedAt
+        move.revertReason = reason
+      }
+      persist()
+    },
+    interruptGame(gameId: string, reason: string) {
+      const game = games.find((candidate) => candidate.id === gameId)
+      if (!game || game.status !== 'active') return
+      game.status = 'interrupted'
+      game.interruptionReason = reason
+      game.finishedAt = now()
+      persist()
+      scheduleRetrospective(game)
+    },
+    finishGame(gameId: string, result: Exclude<GameResult, null>) {
+      const game = games.find((candidate) => candidate.id === gameId)
+      if (!game || game.status !== 'active') return
+      game.status = 'completed'
+      game.result = result
+      game.finishedAt = now()
+      persist()
+      scheduleRetrospective(game)
+    },
+    getGames: () => structuredClone(games),
+    flush: async () => writes,
+  }
+}
+
 export interface AIDecisionRecord {
   positionKey: string
   selectedMove: { row: number; col: number }
@@ -24,87 +327,181 @@ export interface AIDecisionRecord {
   source: AIDecisionSource
 }
 
-export interface SessionGameRecord {
-  id: string
-  startedAt: number
-  finishedAt?: number
-  result?: Exclude<GameResult, null>
-  moves: Move[]
-  aiDecisions: AIDecisionRecord[]
-  aiPlayer?: Player
-  reviewSummary?: ReviewSummary
+export type SessionGameRecord = GameHistoryRecord
+
+const HISTORY_DATABASE = 'gomoku-game-history'
+const HISTORY_STORE = 'history'
+const HISTORY_KEY = 'games'
+
+export function createIndexedDbGameHistoryStorage(
+  factory: IDBFactory | undefined = globalThis.indexedDB,
+): GameHistoryStorage {
+  if (!factory) return { load: async () => [], save: async () => undefined }
+  const database = new Promise<IDBDatabase>((resolve, reject) => {
+    const request = factory.open(HISTORY_DATABASE, 1)
+    request.onupgradeneeded = () => request.result.createObjectStore(HISTORY_STORE)
+    request.onsuccess = () => resolve(request.result)
+    request.onerror = () => reject(request.error)
+  })
+  return {
+    async load() {
+      const db = await database
+      return new Promise<GameHistoryRecord[]>((resolve, reject) => {
+        const request = db.transaction(HISTORY_STORE).objectStore(HISTORY_STORE).get(HISTORY_KEY)
+        request.onsuccess = () =>
+          resolve(Array.isArray(request.result) ? request.result.filter(isGameHistoryRecord) : [])
+        request.onerror = () => reject(request.error)
+      })
+    },
+    async save(records) {
+      const db = await database
+      await new Promise<void>((resolve, reject) => {
+        const transaction = db.transaction(HISTORY_STORE, 'readwrite')
+        // ponytail: one snapshot keeps ordering simple; split per game if history size becomes measurable.
+        transaction.objectStore(HISTORY_STORE).put(structuredClone(records), HISTORY_KEY)
+        transaction.oncomplete = () => resolve()
+        transaction.onerror = () => reject(transaction.error)
+        transaction.onabort = () => reject(transaction.error)
+      })
+    },
+  }
 }
 
-let records: SessionGameRecord[] = loadRecords()
-
-function isRecord(value: unknown): value is SessionGameRecord {
+function isGameHistoryRecord(value: unknown): value is GameHistoryRecord {
   if (!value || typeof value !== 'object') return false
-  const record = value as Partial<SessionGameRecord>
+  const record = value as Partial<GameHistoryRecord>
   return (
+    record.schemaVersion === 1 &&
     typeof record.id === 'string' &&
     typeof record.startedAt === 'number' &&
-    Array.isArray(record.moves) &&
-    Array.isArray(record.aiDecisions)
+    ['active', 'completed', 'interrupted'].includes(String(record.status)) &&
+    Array.isArray(record.moves)
   )
 }
 
-function loadRecords(): SessionGameRecord[] {
+function legacySessionGames(): GameHistoryRecord[] {
   try {
-    const raw = sessionStorage.getItem(SESSION_EXPERIENCE_KEY)
-    if (!raw) return []
-    const parsed: unknown = JSON.parse(raw)
-    if (!Array.isArray(parsed) || !parsed.every(isRecord)) throw new Error('invalid experience')
-    return parsed.slice(-SEARCH_CONFIG.sessionGameLimit)
+    const parsed: unknown = JSON.parse(sessionStorage.getItem(SESSION_EXPERIENCE_KEY) ?? 'null')
+    if (!Array.isArray(parsed)) return []
+    return parsed.flatMap((value) => {
+      if (!value || typeof value !== 'object') return []
+      const legacy = value as {
+        id?: unknown
+        startedAt?: unknown
+        finishedAt?: unknown
+        result?: unknown
+        moves?: unknown
+        aiDecisions?: unknown
+        aiPlayer?: unknown
+        reviewSummary?: unknown
+      }
+      if (
+        typeof legacy.id !== 'string' ||
+        typeof legacy.startedAt !== 'number' ||
+        !Array.isArray(legacy.moves) ||
+        !Array.isArray(legacy.aiDecisions)
+      )
+        return []
+      const aiPlayer: Player = legacy.aiPlayer === 1 ? 1 : 2
+      const result = ['blackWin', 'whiteWin', 'draw'].includes(String(legacy.result))
+        ? (legacy.result as Exclude<GameResult, null>)
+        : undefined
+      return [
+        {
+          id: legacy.id,
+          schemaVersion: 1,
+          status: result ? 'completed' : 'interrupted',
+          startedAt: legacy.startedAt,
+          ...(typeof legacy.finishedAt === 'number' ? { finishedAt: legacy.finishedAt } : {}),
+          ...(result ? { result } : { interruptionReason: 'legacy-incomplete' }),
+          humanPlayer: aiPlayer === 1 ? 2 : 1,
+          aiPlayer,
+          boardSize: 15,
+          legacy: true,
+          incomplete: true,
+          moves: legacy.moves.map((move, index) => ({
+            ...(move as Move),
+            id: `${legacy.id}:legacy-move:${index + 1}`,
+            phase: 'legacy',
+          })),
+          aiDecisions: structuredClone(legacy.aiDecisions as AIDecisionRecord[]),
+          aiDiagnostics: [],
+          anomalies: [],
+          ...(legacy.reviewSummary
+            ? { reviewSummary: structuredClone(legacy.reviewSummary as ReviewSummary) }
+            : {}),
+        } satisfies GameHistoryRecord,
+      ]
+    })
   } catch {
-    try {
-      sessionStorage.removeItem(SESSION_EXPERIENCE_KEY)
-    } catch {
-      // Storage may be unavailable; the in-memory experience remains usable.
-    }
     return []
   }
 }
 
-function persist() {
-  records = records.slice(-SEARCH_CONFIG.sessionGameLimit)
-  try {
-    sessionStorage.setItem(SESSION_EXPERIENCE_KEY, JSON.stringify(records))
-  } catch {
-    // Session experience is optional and must never block the game.
-  }
+async function requestGameAnomalyReview(game: GameHistoryRecord): Promise<GameAnomalyReview> {
+  const response = await fetch('/api/gomoku/anomaly-review', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      game: {
+        id: game.id,
+        status: game.status,
+        result: game.result,
+        anomalies: game.anomalies,
+        aiDiagnostics: game.aiDiagnostics,
+      },
+    }),
+    signal: AbortSignal.timeout(10_000),
+  })
+  const data: unknown = await response.json().catch(() => null)
+  if (!response.ok) throw new Error(`异常复盘请求失败（HTTP ${response.status}）`)
+  if (!data || typeof data !== 'object') throw new Error('异常复盘格式无效')
+  const review = data as Partial<GameAnomalyReview>
+  if (
+    typeof review.summary !== 'string' ||
+    !Array.isArray(review.anomalyIds) ||
+    !review.anomalyIds.every((item) => typeof item === 'string') ||
+    !Array.isArray(review.lessons) ||
+    !review.lessons.every((item) => typeof item === 'string') ||
+    !Array.isArray(review.followUps) ||
+    !review.followUps.every((item) => typeof item === 'string')
+  )
+    throw new Error('异常复盘格式无效')
+  return review as GameAnomalyReview
 }
 
-function copyMoves(moves: Move[]) {
-  return moves.map((move) => ({ ...move }))
-}
+const indexedDbStorage = createIndexedDbGameHistoryStorage()
+const defaultHistory = createGameHistoryService({
+  storage: {
+    async load() {
+      const persisted = await indexedDbStorage.load()
+      const merged = new Map([...persisted, ...legacySessionGames()].map((game) => [game.id, game]))
+      return [...merged.values()]
+    },
+    save: (games) => indexedDbStorage.save(games),
+  },
+  reviewAnomalies: requestGameAnomalyReview,
+})
+void defaultHistory.load().catch(() => undefined)
+let sessionExperienceGameIds: Set<string> | null = null
 
 export function createPositionKey(board: Board, currentPlayer: 1 | 2) {
   return `${board.map((line) => line.join('')).join('')}|${currentPlayer}`
 }
 
 export function startSessionGame(initialMoves: Move[] = [], aiPlayer: Player = 2) {
-  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
-  records.push({
-    id,
-    startedAt: Date.now(),
-    moves: copyMoves(initialMoves),
-    aiDecisions: [],
+  const gameId = defaultHistory.startGame({
     aiPlayer,
+    humanPlayer: aiPlayer === 1 ? 2 : 1,
   })
-  persist()
-  return id
+  for (const move of initialMoves) defaultHistory.recordMove(gameId, { ...move, phase: 'restored' })
+  sessionExperienceGameIds?.add(gameId)
+  return gameId
 }
 
 export function recordAIDecision(gameId: string, decision: AIDecisionRecord, moves: Move[]) {
-  const game = records.find((record) => record.id === gameId)
-  if (!game) return
-  game.aiDecisions.push({
-    ...decision,
-    selectedMove: { ...decision.selectedMove },
-    ...(decision.localBestMove ? { localBestMove: { ...decision.localBestMove } } : {}),
-  })
-  game.moves = copyMoves(moves)
-  persist()
+  void moves
+  defaultHistory.recordAIDecision(gameId, decision)
 }
 
 export function finishSessionGame(
@@ -112,40 +509,30 @@ export function finishSessionGame(
   result: Exclude<GameResult, null>,
   moves: Move[],
 ) {
-  const game = records.find((record) => record.id === gameId)
-  if (!game || game.finishedAt) return
-  game.result = result
-  game.finishedAt = Date.now()
-  game.moves = copyMoves(moves)
-  persist()
+  void moves
+  defaultHistory.finishGame(gameId, result)
 }
 
 export function discardUnfinishedGame(gameId: string) {
-  records = records.filter((record) => record.id !== gameId || record.finishedAt)
-  persist()
+  defaultHistory.interruptGame(gameId, 'restart')
 }
 
 export function removeSessionGame(gameId: string) {
-  records = records.filter((record) => record.id !== gameId)
-  persist()
+  defaultHistory.interruptGame(gameId, 'replaced')
 }
 
 export function saveReviewSummary(gameId: string, summary: ReviewSummary) {
-  const game = records.find((record) => record.id === gameId)
-  if (!game) return
-  game.reviewSummary = {
-    ...summary,
-    mistakeTags: [...summary.mistakeTags],
-    strengthTags: [...summary.strengthTags],
-    lessons: [...summary.lessons],
-  }
-  persist()
+  defaultHistory.saveReviewSummary(gameId, summary)
 }
 
 export function getSessionReviewHistorySummary(): SessionReviewHistorySummary {
-  const summaries = records.flatMap((record) =>
-    record.reviewSummary ? [record.reviewSummary] : [],
-  )
+  const summaries = defaultHistory
+    .getGames()
+    .flatMap((record) =>
+      (!sessionExperienceGameIds || sessionExperienceGameIds.has(record.id)) && record.reviewSummary
+        ? [record.reviewSummary]
+        : [],
+    )
   const counts = new Map<string, number>()
   for (const summary of summaries) {
     for (const tag of new Set(summary.mistakeTags)) counts.set(tag, (counts.get(tag) ?? 0) + 1)
@@ -164,13 +551,15 @@ export function getSessionReviewHistorySummary(): SessionReviewHistorySummary {
 }
 
 export function getPositionExperience(positionKey: string): PositionExperienceSummary | undefined {
-  const related = records.flatMap((game) =>
-    game.result
-      ? game.aiDecisions
-          .filter((decision) => decision.positionKey === positionKey)
-          .map((decision) => ({ game, decision }))
-      : [],
-  )
+  const related = defaultHistory
+    .getGames()
+    .flatMap((game) =>
+      game.result && (!sessionExperienceGameIds || sessionExperienceGameIds.has(game.id))
+        ? game.aiDecisions
+            .filter((decision) => decision.positionKey === positionKey)
+            .map((decision) => ({ game, decision }))
+        : [],
+    )
   if (related.length === 0) return undefined
 
   const moveStats = new Map<string, PositionExperienceSummary['moves'][number]>()
@@ -210,32 +599,26 @@ export function decisionFromCandidate(
 }
 
 export function clearSessionExperience() {
-  records = []
-  try {
-    sessionStorage.removeItem(SESSION_EXPERIENCE_KEY)
-  } catch {
-    // Keep clear safe when storage is unavailable.
-  }
+  sessionExperienceGameIds = new Set()
 }
 
 export function reloadSessionExperience() {
-  records = loadRecords()
+  return defaultHistory.load()
 }
 
 export function getSessionGames() {
-  return records.map((record) => ({
-    ...record,
-    moves: copyMoves(record.moves),
-    aiDecisions: record.aiDecisions.map((decision) => ({ ...decision })),
-    ...(record.reviewSummary
-      ? {
-          reviewSummary: {
-            ...record.reviewSummary,
-            mistakeTags: [...record.reviewSummary.mistakeTags],
-            strengthTags: [...record.reviewSummary.strengthTags],
-            lessons: [...record.reviewSummary.lessons],
-          },
-        }
-      : {}),
-  }))
+  return defaultHistory.getGames()
 }
+
+export const recordGameMove = (gameId: string, move: Move & { phase: string }) =>
+  defaultHistory.recordMove(gameId, move)
+export const recordGameAnomaly = (gameId: string, anomaly: GameAnomalyInput) =>
+  defaultHistory.recordAnomaly(gameId, anomaly)
+export const recordAIDiagnostic = (gameId: string, diagnostic: GomokuAIDiagnostic) =>
+  defaultHistory.recordAIDiagnostic(gameId, diagnostic)
+export const interruptSessionGame = (gameId: string, reason: string) =>
+  defaultHistory.interruptGame(gameId, reason)
+export const revertSessionMovesAfter = (gameId: string, moveCount: number) =>
+  defaultHistory.revertMovesAfter(gameId, moveCount, 'undo')
+export const getHistoricalAnomalies = (limit = 5) => defaultHistory.queryAnomalies({ limit })
+export const flushGameHistory = () => defaultHistory.flush()

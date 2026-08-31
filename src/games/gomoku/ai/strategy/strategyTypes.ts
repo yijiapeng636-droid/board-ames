@@ -1,10 +1,22 @@
 import type { AgentFallbackReason } from '@/ai/runtime/agentTypes'
+import type { HistoricalAnomalySummary } from '@/games/gomoku/ai/sessionExperience'
 import type { SearchOptions } from '@/games/gomoku/ai/search'
 import type { ThreatSearchOptions, ThreatSearchResult } from '@/games/gomoku/ai/threatSearch'
-import type { Board, FixedCandidateSearchResult, Move, Player, PositionExperienceSummary, PrincipalVariationMove, SearchResult } from '@/games/gomoku/types/gomoku'
+import type {
+  Board,
+  FixedCandidateSearchResult,
+  Move,
+  Player,
+  PositionExperienceSummary,
+  PrincipalVariationMove,
+  SearchResult,
+} from '@/games/gomoku/types/gomoku'
 
 export type StrategyMode = 'quick' | 'normal' | 'deep' | 'forcing'
-export interface StrategyPosition { row: number; col: number }
+export interface StrategyPosition {
+  row: number
+  col: number
+}
 export interface StrategyCandidate extends StrategyPosition {
   attackScore: number
   defenseScore: number
@@ -17,7 +29,9 @@ export interface StrategyCandidate extends StrategyPosition {
   createsDoubleThreat: boolean
   createsFourThree: boolean
   protected: boolean
-  sources: Array<'immediate_win' | 'mandatory_block' | 'forcing' | 'baseline' | 'attacking' | 'candidate_pool'>
+  sources: Array<
+    'immediate_win' | 'mandatory_block' | 'forcing' | 'baseline' | 'attacking' | 'candidate_pool'
+  >
   baselineSearchScore?: number
   baselinePrincipalVariation?: PrincipalVariationMove[]
 }
@@ -40,10 +54,32 @@ export interface GomokuAgentContext {
   readonly allowedCandidates: StrategyCandidate[]
   readonly baselineSearch: SearchResult
   readonly sessionExperience?: PositionExperienceSummary
-  readonly runSearch: (board: Board, options: SearchOptions, signal: AbortSignal) => Promise<SearchResult>
-  readonly runFixedSearch: (board: Board, move: StrategyPosition, player: Player, options: SearchOptions, signal: AbortSignal) => Promise<FixedCandidateSearchResult>
-  readonly runThreatSearch: (board: Board, player: Player, options: ThreatSearchOptions, signal: AbortSignal) => Promise<ThreatSearchResult>
-  readonly runThreatSearchFromMove: (board: Board, player: Player, move: StrategyPosition, options: ThreatSearchOptions, signal: AbortSignal) => Promise<ThreatSearchResult>
+  readonly historicalAnomalies?: HistoricalAnomalySummary
+  readonly runSearch: (
+    board: Board,
+    options: SearchOptions,
+    signal: AbortSignal,
+  ) => Promise<SearchResult>
+  readonly runFixedSearch: (
+    board: Board,
+    move: StrategyPosition,
+    player: Player,
+    options: SearchOptions,
+    signal: AbortSignal,
+  ) => Promise<FixedCandidateSearchResult>
+  readonly runThreatSearch: (
+    board: Board,
+    player: Player,
+    options: ThreatSearchOptions,
+    signal: AbortSignal,
+  ) => Promise<ThreatSearchResult>
+  readonly runThreatSearchFromMove: (
+    board: Board,
+    player: Player,
+    move: StrategyPosition,
+    options: ThreatSearchOptions,
+    signal: AbortSignal,
+  ) => Promise<ThreatSearchResult>
 }
 
 export interface GomokuStrategyDecision {

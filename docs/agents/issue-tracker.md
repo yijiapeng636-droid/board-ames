@@ -1,40 +1,30 @@
-# Issue tracker: GitHub
+# Issue tracker: Local Markdown
 
-本仓库的任务与规格记录在 GitHub Issues 中，所有操作使用 `gh` CLI。
+本仓库的任务与规格存放在 `.scratch/` 下的 Markdown 文件中。
 
-## 常用操作
+## 约定
 
-- 创建：`gh issue create --title "..." --body "..."`
-- 查看：`gh issue view <编号> --comments`
-- 列出：`gh issue list --state open`
-- 评论：`gh issue comment <编号> --body "..."`
-- 添加标签：`gh issue edit <编号> --add-label "..."`
-- 移除标签：`gh issue edit <编号> --remove-label "..."`
-- 关闭：`gh issue close <编号> --comment "..."`
-
-在当前 Git 仓库内执行命令，让 `gh` 根据远程地址自动识别仓库。
-
-## 将 Pull Request 作为分诊入口
-
-**PR 作为需求入口：否。**
-
-如以后需要把外部 PR 纳入分诊，可将上面的设置改为“是”，并使用对应的 `gh pr` 命令。
-
-GitHub Issue 和 PR 共用编号空间。遇到 `#42` 之类的编号时，可先执行 `gh pr view 42`，失败后再执行 `gh issue view 42`。
+- 每个功能一个目录：`.scratch/<feature-slug>/`
+- 规格文件：`.scratch/<feature-slug>/spec.md`
+- 实施工单：`.scratch/<feature-slug>/issues/<NN>-<slug>.md`，从 `01` 开始编号，每个工单一个文件
+- 分诊状态记录为文件顶部附近的 `Status:` 行，角色字符串见 `triage-labels.md`
+- 评论与对话历史追加到文件底部的 `## Comments` 标题下
 
 ## 技能要求“发布到问题跟踪器”时
 
-创建一个 GitHub Issue。
+在 `.scratch/<feature-slug>/` 下创建对应 Markdown 文件，必要时创建目录。
 
 ## 技能要求“读取相关任务”时
 
-执行 `gh issue view <编号> --comments`。
+读取用户给出的任务路径或编号对应文件。
 
 ## Wayfinder 操作
 
-- 地图：使用带有 `wayfinder:map` 标签的单个 Issue。
-- 子任务：优先使用 GitHub Sub-issues；不可用时，在地图正文中使用任务列表，并在子任务开头写明 `Part of #<地图编号>`。
-- 子任务类型标签：`wayfinder:research`、`wayfinder:prototype`、`wayfinder:grilling` 或 `wayfinder:task`。
-- 阻塞关系：优先使用 GitHub 原生 Issue Dependencies；不可用时，在子任务顶部写明 `Blocked by: #<编号>`。
-- 领取任务：`gh issue edit <编号> --add-assignee @me`。
-- 完成任务：添加结论评论、关闭 Issue，并把上下文链接补充到地图的 Decisions-so-far 部分。
+- 地图：`.scratch/<effort>/map.md`，正文包含 Notes、Decisions-so-far 和 Fog。
+- 子任务：`.scratch/<effort>/issues/NN-<slug>.md`，每个工单一个文件。
+- 类型：通过 `Type:` 记录 `research`、`prototype`、`grilling` 或 `task`。
+- 状态：通过 `Status:` 记录 `claimed` 或 `resolved`。
+- 阻塞：在文件顶部附近通过 `Blocked by: NN, NN` 记录；所有对应工单为 `resolved` 后解除阻塞。
+- 前沿：扫描 `issues/` 中未解决、未阻塞且未领取的文件，按编号优先。
+- 领取：将状态改为 `claimed` 并先保存。
+- 完成：追加 `## Answer`，将状态改为 `resolved`，并将上下文指针追加到 `map.md` 的 Decisions-so-far。

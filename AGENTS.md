@@ -2,7 +2,7 @@
 
 ### Issue tracker
 
-任务、规格和问题统一记录在 GitHub Issues 中，通过 `gh` CLI 操作。详见 `docs/agents/issue-tracker.md`。
+创建、读取或分诊任务与规格时，使用 `.scratch/<feature>/` 下的本地 Markdown。详见 `docs/agents/issue-tracker.md`。
 
 ### Triage labels
 

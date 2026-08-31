@@ -6,19 +6,29 @@ import { createSafeSearchFallback } from '@/games/gomoku/ai/search'
 import { searchAIMoves } from '@/games/gomoku/ai/searchClient'
 import { buildGomokuAgentContext } from '@/games/gomoku/ai/strategy/agentConfig'
 import { describeGomokuAgentFailure } from '@/games/gomoku/ai/strategy/agentDiagnostics'
-import { createGomokuFallback, runGomokuStrategyAgent } from '@/games/gomoku/ai/strategy/gomokuAgent'
+import {
+  createGomokuFallback,
+  runGomokuStrategyAgent,
+} from '@/games/gomoku/ai/strategy/gomokuAgent'
 import { validateGomokuTacticalGate } from '@/games/gomoku/ai/strategy/tacticalGate'
-import { buildStrategyCandidateSet, strategyCandidateAsSearched } from '@/games/gomoku/ai/strategy/strategyCandidateSet'
+import {
+  buildStrategyCandidateSet,
+  strategyCandidateAsSearched,
+} from '@/games/gomoku/ai/strategy/strategyCandidateSet'
 import {
   clearSessionExperience,
   createPositionKey,
   decisionFromCandidate,
-  discardUnfinishedGame,
   finishSessionGame,
+  getHistoricalAnomalies,
   getPositionExperience,
   getSessionReviewHistorySummary,
+  interruptSessionGame,
+  recordAIDiagnostic,
   recordAIDecision,
-  removeSessionGame,
+  recordGameAnomaly,
+  recordGameMove,
+  revertSessionMovesAfter,
   saveReviewSummary,
   startSessionGame,
   type AIDecisionSource,
@@ -75,11 +85,24 @@ const gameSessionId = ref(0)
 let aiController: AbortController | null = null
 let hintController: AbortController | null = null
 let reviewController: AbortController | null = null
-let experienceGameId = startSessionGame()
+let experienceGameId: string | null = null
 const isDevelopment = import.meta.env.DEV
 
 function appendDiagnostic(diagnostic: GomokuAIDiagnostic) {
   aiDiagnostics.value = [...aiDiagnostics.value.slice(-59), structuredClone(diagnostic)]
+  if (!experienceGameId) return
+  recordAIDiagnostic(experienceGameId, diagnostic)
+  if (diagnostic.fallbackReason) {
+    recordGameAnomaly(experienceGameId, {
+      subsystem: 'agent',
+      stage: diagnostic.fallbackStage ?? 'decision',
+      code: diagnostic.fallbackReason,
+      message: diagnostic.fallbackMessage ?? diagnostic.fallbackReason,
+      moveNumber: diagnostic.moveNumber,
+      recoverable: true,
+      fallbackAction: 'local-search',
+    })
+  }
 }
 
 async function copyAITrace() {
@@ -119,12 +142,14 @@ function abortAll() {
 function returnHome() {
   gameSessionId.value += 1
   abortAll()
+  if (experienceGameId) interruptSessionGame(experienceGameId, 'return-home')
   emit('back')
 }
 
 onBeforeUnmount(() => {
   gameSessionId.value += 1
   abortAll()
+  if (experienceGameId) interruptSessionGame(experienceGameId, 'unmount')
 })
 
 function savePlayerCheckpoint() {
@@ -160,16 +185,26 @@ async function requestReviewSummary(sessionId: number) {
     if (sessionId !== gameSessionId.value) return
     gameReview.value = review
     reviewPhase.value = 'ready'
-    saveReviewSummary(experienceGameId, {
-      result: result.value,
-      mistakeTags: review.recurringIssues,
-      strengthTags: review.strengths,
-      lessons: review.practiceSuggestions,
-    })
+    if (experienceGameId) {
+      saveReviewSummary(experienceGameId, {
+        result: result.value,
+        mistakeTags: review.recurringIssues,
+        strengthTags: review.strengths,
+        lessons: review.practiceSuggestions,
+      })
+    }
   } catch (error) {
     if (sessionId !== gameSessionId.value || controller.signal.aborted) return
     reviewPhase.value = 'error'
     reviewError.value = error instanceof Error ? error.message : 'AI 教学总结失败'
+    if (experienceGameId)
+      recordGameAnomaly(experienceGameId, {
+        subsystem: 'review',
+        stage: 'model_request',
+        code: 'teaching_review_failed',
+        message: reviewError.value,
+        recoverable: true,
+      })
   }
 }
 
@@ -199,6 +234,14 @@ async function runReview() {
     if (sessionId !== gameSessionId.value || controller.signal.aborted) return
     reviewPhase.value = 'error'
     reviewError.value = error instanceof Error ? error.message : '本地复盘失败'
+    if (experienceGameId)
+      recordGameAnomaly(experienceGameId, {
+        subsystem: 'review',
+        stage: 'local_analysis',
+        code: 'local_review_failed',
+        message: reviewError.value,
+        recoverable: true,
+      })
   }
 }
 
@@ -206,7 +249,7 @@ function finishMove(row: number, col: number, mover: Player): boolean {
   result.value = resultAfterMove(board.value, row, col)
   if (result.value) {
     phase.value = 'gameOver'
-    finishSessionGame(experienceGameId, result.value, moves.value)
+    if (experienceGameId) finishSessionGame(experienceGameId, result.value, moves.value)
     clearHint()
     void runReview()
     return true
@@ -227,30 +270,33 @@ function applyAIMove(
   positionKey: string,
 ) {
   placePiece(board.value, moves.value, move.row, move.col, aiPlayer.value, phase.value)
-  recordAIDecision(
-    experienceGameId,
-    decisionFromCandidate(positionKey, selected, localBest, source),
-    moves.value,
-  )
+  if (experienceGameId) {
+    recordGameMove(experienceGameId, {
+      ...moves.value[moves.value.length - 1]!,
+      phase: 'aiThinking',
+    })
+    recordAIDecision(
+      experienceGameId,
+      decisionFromCandidate(positionKey, selected, localBest, source),
+      moves.value,
+    )
+  }
   aiReason.value = reason
   return finishMove(move.row, move.col, aiPlayer.value)
 }
 
-function useSearchFallback(searchResult: SearchResult, positionKey: string, reason: string): boolean {
+function useSearchFallback(
+  searchResult: SearchResult,
+  positionKey: string,
+  reason: string,
+): boolean {
   const fallback = searchResult.candidates[0]
   if (!fallback) {
     errorMessage.value = '没有可用的 AI 候选落点'
     phase.value = 'aiError'
     return true
   }
-  return applyAIMove(
-    fallback,
-    reason,
-    fallback,
-    fallback,
-    'searchFallback',
-    positionKey,
-  )
+  return applyAIMove(fallback, reason, fallback, fallback, 'searchFallback', positionKey)
 }
 
 async function runAITurn() {
@@ -269,8 +315,18 @@ async function runAITurn() {
       searchResult = await searchAIMoves(board.value, controller.signal, {
         rootPlayer: aiPlayer.value,
       })
-    } catch {
+    } catch (error) {
       if (requestSessionId !== gameSessionId.value || controller.signal.aborted) return
+      if (experienceGameId)
+        recordGameAnomaly(experienceGameId, {
+          subsystem: 'search',
+          stage: 'worker',
+          code: 'search_failed',
+          message: error instanceof Error ? error.message : '本地搜索失败',
+          moveNumber: moves.value.length + 1,
+          recoverable: true,
+          fallbackAction: 'safe-search',
+        })
       searchResult = createSafeSearchFallback(board.value, aiPlayer.value)
     }
     if (requestSessionId !== gameSessionId.value || controller.signal.aborted) return
@@ -278,6 +334,15 @@ async function runAITurn() {
     if (!localBest) {
       errorMessage.value = '本地搜索没有返回合法候选'
       phase.value = 'aiError'
+      if (experienceGameId)
+        recordGameAnomaly(experienceGameId, {
+          subsystem: 'search',
+          stage: 'candidate_selection',
+          code: 'no_legal_candidate',
+          message: errorMessage.value,
+          moveNumber: moves.value.length + 1,
+          recoverable: false,
+        })
       return
     }
     const positionKey = createPositionKey(board.value, aiPlayer.value)
@@ -291,11 +356,24 @@ async function runAITurn() {
         moveNumber: moves.value.length + 1,
         aiPlayer: aiPlayer.value,
         sideToMove: currentPlayer.value,
-        strategyCandidateCount: buildStrategyCandidateSet(board.value, aiPlayer.value, searchResult).length,
-        ...(searchResult.candidates[0] ? { baselineBest: { row: searchResult.candidates[0].row, col: searchResult.candidates[0].col, searchScore: searchResult.candidates[0].searchScore } } : {}),
+        strategyCandidateCount: buildStrategyCandidateSet(board.value, aiPlayer.value, searchResult)
+          .length,
+        ...(searchResult.candidates[0]
+          ? {
+              baselineBest: {
+                row: searchResult.candidates[0].row,
+                col: searchResult.candidates[0].col,
+                searchScore: searchResult.candidates[0].searchScore,
+              },
+            }
+          : {}),
         baselineCompletedDepth: searchResult.metrics.searchDepth,
         forcedMoveType: searchResult.forcedMoveType,
-        threatSearchStatus: searchResult.forcedMoveType === 'forcedTactical' || searchResult.forcedMoveType === 'forcedWin' ? 'proven_win' : 'not_proven',
+        threatSearchStatus:
+          searchResult.forcedMoveType === 'forcedTactical' ||
+          searchResult.forcedMoveType === 'forcedWin'
+            ? 'proven_win'
+            : 'not_proven',
         agentUsed: false,
         agentToolCalls: [],
         agentModelCalls: 0,
@@ -328,6 +406,7 @@ async function runAITurn() {
       currentPlayer.value,
       searchResult,
       sessionExperience,
+      getHistoricalAnomalies(3),
     )
     const contextIsCurrent = () =>
       requestSessionId === gameSessionId.value &&
@@ -336,14 +415,13 @@ async function runAITurn() {
       phase.value === 'aiThinking' &&
       createPositionKey(board.value, aiPlayer.value) === context.positionKey
     try {
-      const agentResult = await runGomokuStrategyAgent(
-        context,
-        controller.signal,
-        contextIsCurrent,
-      )
+      const agentResult = await runGomokuStrategyAgent(context, controller.signal, contextIsCurrent)
       if (!contextIsCurrent()) return
       const toolNames = agentResult.trace.toolCalls.map((call) => call.name)
-      const gateReason = agentResult.source === 'agent' ? validateGomokuTacticalGate(agentResult.decision, context) : null
+      const gateReason =
+        agentResult.source === 'agent'
+          ? validateGomokuTacticalGate(agentResult.decision, context)
+          : null
       const decision = gateReason ? createGomokuFallback(context, gateReason) : agentResult.decision
       const decisionSource = gateReason ? 'fallback' : agentResult.source
       const fallbackReason = gateReason ?? agentResult.trace.fallbackReason
@@ -378,13 +456,18 @@ async function runAITurn() {
       const strategySelected = context.allowedCandidates.find(
         (candidate) => candidate.row === move.row && candidate.col === move.col,
       )!
-      const selected = baselineSelected ?? strategyCandidateAsSearched(strategySelected, aiPlayer.value)
+      const selected =
+        baselineSelected ?? strategyCandidateAsSearched(strategySelected, aiPlayer.value)
       appendDiagnostic({
         moveNumber: moves.value.length + 1,
         aiPlayer: aiPlayer.value,
         sideToMove: currentPlayer.value,
         strategyCandidateCount: context.allowedCandidates.length,
-        baselineBest: { row: localBest.row, col: localBest.col, searchScore: localBest.searchScore },
+        baselineBest: {
+          row: localBest.row,
+          col: localBest.col,
+          searchScore: localBest.searchScore,
+        },
         baselineCompletedDepth: searchResult.metrics.searchDepth,
         forcedMoveType: searchResult.forcedMoveType,
         threatSearchStatus: 'not_proven',
@@ -412,7 +495,7 @@ async function runAITurn() {
           move,
           decisionSource === 'agent'
             ? decision.reason
-            : failure?.message ?? 'DeepSeek Agent 未完成有效决策，已采用本地搜索结果。',
+            : (failure?.message ?? 'DeepSeek Agent 未完成有效决策，已采用本地搜索结果。'),
           selected,
           localBest,
           decisionSource === 'agent' ? 'deepseek' : 'searchFallback',
@@ -442,7 +525,11 @@ async function runAITurn() {
         aiPlayer: aiPlayer.value,
         sideToMove: currentPlayer.value,
         strategyCandidateCount: context.allowedCandidates.length,
-        baselineBest: { row: localBest.row, col: localBest.col, searchScore: localBest.searchScore },
+        baselineBest: {
+          row: localBest.row,
+          col: localBest.col,
+          searchScore: localBest.searchScore,
+        },
         baselineCompletedDepth: searchResult.metrics.searchDepth,
         forcedMoveType: searchResult.forcedMoveType,
         threatSearchStatus: 'not_proven',
@@ -471,6 +558,11 @@ function handlePlayerMove(row: number, col: number) {
   savePlayerCheckpoint()
   try {
     placePiece(board.value, moves.value, row, col, humanPlayer.value, phase.value)
+    if (experienceGameId)
+      recordGameMove(experienceGameId, {
+        ...moves.value[moves.value.length - 1]!,
+        phase: 'playerTurn',
+      })
   } catch {
     checkpoints.value.pop()
     return
@@ -500,9 +592,17 @@ async function showHint() {
           reason: `建议落在第 ${best.row + 1} 行、第 ${best.col + 1} 列`,
         }
       : { phase: 'error', move: null, reason: '当前没有可用提示' }
-  } catch {
+  } catch (error) {
     if (sessionId !== gameSessionId.value || controller.signal.aborted) return
     hint.value = { phase: 'error', move: null, reason: '提示计算失败，请重试' }
+    if (experienceGameId)
+      recordGameAnomaly(experienceGameId, {
+        subsystem: 'search',
+        stage: 'hint',
+        code: 'hint_failed',
+        message: error instanceof Error ? error.message : hint.value.reason,
+        recoverable: true,
+      })
   }
 }
 
@@ -524,27 +624,28 @@ function undo() {
   if (!checkpoint) return
   gameSessionId.value += 1
   abortAll()
-  removeSessionGame(experienceGameId)
+  if (experienceGameId) revertSessionMovesAfter(experienceGameId, checkpoint.moves.length)
   board.value = checkpoint.board.map((line) => [...line])
   moves.value = checkpoint.moves.map((move) => ({ ...move }))
-  aiDiagnostics.value = aiDiagnostics.value.filter((diagnostic) => diagnostic.moveNumber <= moves.value.length)
+  aiDiagnostics.value = aiDiagnostics.value.filter(
+    (diagnostic) => diagnostic.moveNumber <= moves.value.length,
+  )
   currentPlayer.value = checkpoint.currentPlayer
   bonusMoves.value = { ...checkpoint.bonusMoves }
   phase.value = checkpoint.phase
   result.value = checkpoint.result
   aiReason.value = checkpoint.aiReason
   errorMessage.value = checkpoint.error
-  experienceGameId = startSessionGame(moves.value, aiPlayer.value)
 }
 
 function retryAI() {
   if (phase.value === 'aiError' && !result.value) void runAITurn()
 }
 
-function startGame(selectedAIPlayer: Player) {
+function startGame(selectedAIPlayer: Player, interruptionReason = 'side-change') {
   gameSessionId.value += 1
   abortAll()
-  discardUnfinishedGame(experienceGameId)
+  if (experienceGameId) interruptSessionGame(experienceGameId, interruptionReason)
   humanPlayer.value = selectedAIPlayer === 1 ? 2 : 1
   aiPlayer.value = selectedAIPlayer
   board.value = createBoard()
@@ -565,12 +666,11 @@ function startGame(selectedAIPlayer: Player) {
 }
 
 function restart() {
-  startGame(aiPlayer.value)
+  startGame(aiPlayer.value, 'restart')
 }
 
 function clearExperience() {
   clearSessionExperience()
-  experienceGameId = startSessionGame(moves.value, aiPlayer.value)
   experienceMessage.value = '本次浏览器会话经验已清空'
 }
 

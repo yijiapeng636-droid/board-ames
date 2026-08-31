@@ -3,17 +3,34 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import App from '@/games/gomoku/GomokuGame.vue'
 import { searchAIMoves } from '@/games/gomoku/ai/searchClient'
+import { getSessionGames } from '@/games/gomoku/ai/sessionExperience'
 import { runGomokuStrategyAgent } from '@/games/gomoku/ai/strategy/gomokuAgent'
 import type { SearchResult } from '@/games/gomoku/types/gomoku'
 
 vi.mock('@/games/gomoku/ai/searchClient', () => ({ searchAIMoves: vi.fn<typeof searchAIMoves>() }))
-vi.mock('@/games/gomoku/ai/strategy/gomokuAgent', () => ({ runGomokuStrategyAgent: vi.fn<typeof runGomokuStrategyAgent>() }))
+vi.mock('@/games/gomoku/ai/strategy/gomokuAgent', () => ({
+  runGomokuStrategyAgent: vi.fn<typeof runGomokuStrategyAgent>(),
+}))
 
 const mockedAgent = vi.mocked(runGomokuStrategyAgent)
 const mockedSearch = vi.mocked(searchAIMoves)
 
 function agentResult(row: number, col: number, reason = 'agent choice') {
-  return { decision: { row, col, strategy: 'positional' as const, reason, evidence: ['test'] }, source: 'agent' as const, trace: { startedAt: 0, completedAt: 1, modelCalls: [{ round: 1, durationMs: 1, finishReason: 'stop', toolCalls: [], hasContent: true }], toolCalls: [], totalDurationMs: 1, finalStatus: 'decision' as const, directFinal: true } }
+  return {
+    decision: { row, col, strategy: 'positional' as const, reason, evidence: ['test'] },
+    source: 'agent' as const,
+    trace: {
+      startedAt: 0,
+      completedAt: 1,
+      modelCalls: [
+        { round: 1, durationMs: 1, finishReason: 'stop', toolCalls: [], hasContent: true },
+      ],
+      toolCalls: [],
+      totalDurationMs: 1,
+      finalStatus: 'decision' as const,
+      directFinal: true,
+    },
+  }
 }
 
 async function startWithAIWhite(wrapper: ReturnType<typeof mount>) {
@@ -132,7 +149,11 @@ describe('App', () => {
     mockedSearch.mockResolvedValue({
       ...searchResult,
       forcedMoveType: 'forcedTactical',
-      trace: { ...searchResult.trace, forcedMoveType: 'forcedTactical', finalSource: 'forcedWinSearch' },
+      trace: {
+        ...searchResult.trace,
+        forcedMoveType: 'forcedTactical',
+        finalSource: 'forcedWinSearch',
+      },
     })
     const wrapper = mount(App)
     await startWithAIWhite(wrapper)
@@ -252,6 +273,29 @@ describe('App', () => {
       .find((button) => button.text() === '悔棋')!
     await undoButton.trigger('click')
     expect(wrapper.findAll('.piece')).toHaveLength(0)
+  })
+
+  it('records accepted moves and preserves the interrupted game after restart', async () => {
+    mockedAgent.mockResolvedValue(agentResult(7, 8))
+    const wrapper = mount(App)
+    await startWithAIWhite(wrapper)
+    const games = getSessionGames()
+    const gameId = games[games.length - 1]!.id
+    await wrapper.findAll('[role="gridcell"]')[0]!.trigger('click')
+    await flushPromises()
+    await wrapper
+      .findAll('.actions button')
+      .find((button) => button.text() === '重新开始')!
+      .trigger('click')
+
+    expect(getSessionGames().find((game) => game.id === gameId)).toMatchObject({
+      status: 'interrupted',
+      interruptionReason: 'restart',
+      moves: [
+        expect.objectContaining({ player: 1, row: 0, col: 0 }),
+        expect.objectContaining({ player: 2, row: 7, col: 8 }),
+      ],
+    })
   })
 
   it('applies the VS Code stealth preset and changes board size without changing the board', async () => {
