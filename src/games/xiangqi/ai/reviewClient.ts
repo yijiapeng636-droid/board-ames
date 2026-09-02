@@ -2,6 +2,7 @@ import type { XiangqiReviewPoint } from '@/games/xiangqi/ai/review'
 import type { XiangqiReviewWorkerRequest, XiangqiReviewWorkerResponse } from '@/games/xiangqi/ai/review.worker'
 import { cloneXiangqiMove } from '@/games/xiangqi/core/history'
 import type { XiangqiBoard, XiangqiMove, XiangqiSide } from '@/games/xiangqi/types/xiangqi'
+import { postWorkerData } from '@/workerData'
 
 let id = 0
 export function analyzeXiangqiReviewInWorker(initialBoard: XiangqiBoard, moves: XiangqiMove[], humanSide: XiangqiSide, signal?: AbortSignal): Promise<XiangqiReviewPoint[]> {
@@ -22,6 +23,11 @@ export function analyzeXiangqiReviewInWorker(initialBoard: XiangqiBoard, moves: 
       moves: moves.map(cloneXiangqiMove),
       humanSide,
     }
-    worker.postMessage(request)
+    try {
+      postWorkerData(worker, request, '象棋复盘')
+    } catch (error) {
+      finish()
+      reject(error)
+    }
   })
 }

@@ -13,6 +13,18 @@ function emptyBaseline(): SearchResult {
 }
 
 describe('strategy candidate set', () => {
+  it('exposes only deep-search candidates within the acceptable score margin', () => {
+    const baseline = emptyBaseline()
+    baseline.candidates = [
+      { row: 7, col: 7, staticScore: 1, searchScore: 25_000, features: [], principalVariation: [] },
+      { row: 7, col: 8, staticScore: 1, searchScore: 18_000, features: [], principalVariation: [] },
+      { row: 7, col: 9, staticScore: 1, searchScore: -99_000, features: ['doubleThreat'], principalVariation: [] },
+    ]
+
+    const candidates = buildStrategyCandidateSet(createBoard(), 2, baseline)
+    expect(candidates.map(({ row, col }) => [row, col])).toEqual([[7, 7]])
+  })
+
   it('keeps a forcing point even when it is absent from baseline final candidates', () => {
     const board = createBoard()
     board[7]![5] = 2

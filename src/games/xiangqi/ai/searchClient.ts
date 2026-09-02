@@ -2,6 +2,7 @@ import type { XiangqiSearchOptions, XiangqiSearchResult } from '@/games/xiangqi/
 import type { XiangqiSearchWorkerRequest, XiangqiSearchWorkerResponse } from '@/games/xiangqi/ai/search.worker'
 import { cloneXiangqiHistory } from '@/games/xiangqi/core/history'
 import type { XiangqiBoard, XiangqiSide } from '@/games/xiangqi/types/xiangqi'
+import { postWorkerData } from '@/workerData'
 
 let requestId = 0
 export function searchXiangqiInWorker(board: XiangqiBoard, side: XiangqiSide, options: Omit<XiangqiSearchOptions, 'shouldAbort'>, signal?: AbortSignal): Promise<XiangqiSearchResult> {
@@ -28,6 +29,11 @@ export function searchXiangqiInWorker(board: XiangqiBoard, side: XiangqiSide, op
         mustChangeSide: options.mustChangeSide,
       },
     }
-    worker.postMessage(request)
+    try {
+      postWorkerData(worker, request, '象棋搜索')
+    } catch (error) {
+      finish()
+      reject(error)
+    }
   })
 }

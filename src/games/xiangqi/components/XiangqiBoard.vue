@@ -13,6 +13,8 @@ const props = defineProps<{
   lastMove: XiangqiMove | null
   hintMove?: Pick<XiangqiMove, 'from' | 'to'> | null
   checkedGeneral?: XiangqiPosition | null
+  displaySize?: 'small' | 'medium' | 'large'
+  palette?: 'wood' | 'slate' | 'vscode'
 }>()
 
 const emit = defineEmits<{ select: [position: XiangqiPosition] }>()
@@ -41,7 +43,12 @@ function pieceName(piece: XiangqiPiece) {
 </script>
 
 <template>
-  <div class="xiangqi-board" role="grid" aria-label="10 × 9 中国象棋棋盘">
+  <div
+    class="xiangqi-board"
+    :class="[`board-${displaySize ?? 'medium'}`, `palette-${palette ?? 'wood'}`]"
+    role="grid"
+    aria-label="10 × 9 中国象棋棋盘"
+  >
     <svg class="palaces" viewBox="0 0 8 9" aria-hidden="true">
       <path d="M3 0L5 2M5 0L3 2M3 7L5 9M5 7L3 9" />
     </svg>
@@ -78,15 +85,38 @@ function pieceName(piece: XiangqiPiece) {
 <style scoped>
 .xiangqi-board {
   --cell: clamp(34px, 8vw, 58px);
+  --board-background: #e1b66f;
+  --board-grid: #795226;
+  --board-border: #6f451e;
+  --piece-background: #f4d393;
   position: relative;
   display: grid;
   grid-template-columns: repeat(9, var(--cell));
   grid-template-rows: repeat(10, var(--cell));
   width: fit-content;
   padding: calc(var(--cell) / 2);
-  border: 3px solid #6f451e;
-  background: #e1b66f;
+  border: 3px solid var(--board-border);
+  background: var(--board-background);
   box-shadow: 0 8px 24px rgb(47 29 12 / 20%);
+}
+.board-small {
+  --cell: clamp(28px, 6.5vw, 44px);
+}
+.board-large {
+  --cell: clamp(40px, 9.5vw, 68px);
+}
+.palette-slate {
+  --board-background: #4b5563;
+  --board-grid: #94a3b8;
+  --board-border: #1f2937;
+  --piece-background: #d7c7aa;
+}
+.palette-vscode {
+  --board-background: #1e1e1e;
+  --board-grid: #2f2f2f;
+  --board-border: #333;
+  border-width: 1px;
+  box-shadow: none;
 }
 .intersection {
   position: relative;
@@ -96,8 +126,8 @@ function pieceName(piece: XiangqiPiece) {
   padding: 0;
   border: 0;
   background:
-    linear-gradient(#795226, #795226) center / 100% 1px no-repeat,
-    linear-gradient(90deg, #795226, #795226) center / 1px 100% no-repeat;
+    linear-gradient(var(--board-grid), var(--board-grid)) center / 100% 1px no-repeat,
+    linear-gradient(90deg, var(--board-grid), var(--board-grid)) center / 1px 100% no-repeat;
   cursor: pointer;
 }
 .intersection:focus-visible {
@@ -112,7 +142,7 @@ function pieceName(piece: XiangqiPiece) {
   place-items: center;
   border: 2px solid currentcolor;
   border-radius: 50%;
-  background: #f4d393;
+  background: var(--piece-background);
   box-shadow: 1px 2px 4px rgb(0 0 0 / 30%);
   font-family: 'STKaiti', 'KaiTi', serif;
   font-size: calc(var(--cell) * 0.5);
@@ -167,15 +197,15 @@ function pieceName(piece: XiangqiPiece) {
 }
 .palaces path {
   fill: none;
-  stroke: #795226;
+  stroke: var(--board-grid);
   stroke-width: 0.025;
 }
 .river {
   position: absolute;
   z-index: 1;
   top: 50%;
-  color: #795226;
-  background: #e1b66f;
+  color: var(--board-grid);
+  background: var(--board-background);
   font-family: 'STKaiti', 'KaiTi', serif;
   font-size: calc(var(--cell) * 0.42);
   letter-spacing: 0.3em;
@@ -187,6 +217,26 @@ function pieceName(piece: XiangqiPiece) {
 }
 .river-right {
   right: 20%;
+}
+.palette-vscode .xiangqi-piece {
+  inset: 27%;
+  border: 0;
+  border-radius: 2px;
+  box-shadow: none;
+  font-size: 0;
+}
+.palette-vscode .xiangqi-piece.red {
+  background: #ce9178;
+}
+.palette-vscode .xiangqi-piece.black {
+  background: #569cd6;
+}
+.palette-vscode .river {
+  color: transparent;
+}
+.palette-vscode .intersection.selected .xiangqi-piece {
+  outline-width: 1px;
+  outline-offset: 1px;
 }
 @keyframes check-pulse {
   to {

@@ -235,7 +235,7 @@ function buildAnomalyReviewMessages(payload: unknown) {
     {
       role: 'system',
       content:
-        '你是五子棋运行异常复盘 Agent。只能使用输入中的 anomalies 和 aiDiagnostics，不得发明异常、坐标或原因。anomalyIds 只能引用输入的异常 ID。只输出 JSON：{"summary":"摘要","anomalyIds":["id"],"lessons":["教训"],"followUps":["后续建议"]}。',
+        '你是五子棋棋局异常复盘 Agent。输入中的 anomalies 可能包含运行异常，也可能包含本地确定性 Postmortem 检出的棋力异常。必须把 evidence、positionKey、selectedMove、recommendedMove 和 aiDiagnostics 视为事实，不得推翻本地结论、发明棋形、坐标或根因。优先提炼可复用的决策教训，并区分 Agent 选择问题与本地搜索/威胁模型问题。anomalyIds 只能引用输入的异常 ID。只输出 JSON：{"summary":"摘要","anomalyIds":["id"],"lessons":["教训"],"followUps":["后续建议"]}。',
     },
     { role: 'user', content: `棋局异常 JSON：${JSON.stringify(payload)}` },
   ]
@@ -246,7 +246,7 @@ function buildXiangqiMoveMessages(payload: unknown) {
     {
       role: 'system',
       content:
-        '你是中国象棋训练助手。本地规则引擎已完成合法性、将军、终局、重复棋例和搜索。只能从 searchedCandidates 选择一项，禁止创造落点或改写本地裁决。只输出JSON：{"from":{"row":0,"col":0},"to":{"row":0,"col":0},"reason":"简短说明"}。',
+        '你是中国象棋训练助手。本地规则引擎已完成合法性、将军、终局、重复棋例和搜索。只能从 searchedCandidates 选择一项，禁止创造落点或改写本地裁决。reason 必须使用简体中文，禁止输出英文解释。只输出JSON：{"from":{"row":0,"col":0},"to":{"row":0,"col":0},"reason":"简短中文说明"}。',
     },
     { role: 'user', content: `当前象棋局面JSON：${JSON.stringify(payload)}` },
   ]

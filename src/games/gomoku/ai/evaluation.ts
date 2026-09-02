@@ -32,13 +32,38 @@ const STRUCTURE_VALUES = {
   openTwo: 500,
 } as const
 
+const TACTICAL_DIRECTIONS = [
+  [0, 1],
+  [1, 0],
+  [1, 1],
+  [1, -1],
+] as const
+
+function hasThreatSupport(board: Board, row: number, col: number, player: Player) {
+  return TACTICAL_DIRECTIONS.some(([rowStep, colStep]) => {
+    let stones = 0
+    for (let offset = -4; offset <= 4; offset += 1) {
+      if (offset !== 0 && board[row + rowStep * offset]?.[col + colStep * offset] === player) {
+        stones += 1
+      }
+    }
+    return stones >= 2
+  })
+}
+
 export function inspectPlayerPosition(board: Board, player: Player): PositionFacts {
   const facts: PositionFacts = { five: 0, openFour: 0, closedFour: 0, openThree: 0, closedThree: 0, openTwo: 0, forcingLines: 0, multiThreat: false, connectionScore: 0 }
-  const threat = analyzeBoardThreat(board, player)
+  const threat = analyzeBoardThreat(
+    board,
+    player,
+    { includeDefenseSquares: false },
+  )
   facts.five = threat.fives.length
   facts.openFour = threat.openFours.length
-  facts.closedFour = threat.lines.filter((line) => line.pattern === 'closedFour').length
-  facts.openThree = threat.openThrees.length
+  facts.closedFour = threat.lines.filter(
+    (line) => line.pattern === 'closedFour' || line.pattern === 'brokenFour',
+  ).length
+  facts.openThree = threat.threeThreats.length
   facts.closedThree = threat.lines.filter((line) => line.pattern === 'closedThree').length
   facts.openTwo = threat.lines.filter((line) => line.pattern === 'openTwo').length
   facts.multiThreat = threat.doubleThreat
@@ -71,7 +96,13 @@ export function inspectLeafTactics(
     const forcingMoves: Array<{ row: number; col: number }> = []
     const sameMoveMultiThreats: Array<{ row: number; col: number }> = []
     for (const { row, col } of getNearbyEmptyCells(board)) {
-        const threat = analyzeThreat(board, { row, col }, player)
+        if (!hasThreatSupport(board, row, col, player)) continue
+        const threat = analyzeThreat(
+          board,
+          { row, col },
+          player,
+          { includeDefenseSquares: false },
+        )
         const move = { row, col }
         if (threat.winNow) immediateWins.push(move)
         if (threat.winNow || threat.fours.length > 0 || threat.doubleThreat) forcingMoves.push(move)

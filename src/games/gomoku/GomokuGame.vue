@@ -10,7 +10,10 @@ import {
   createGomokuFallback,
   runGomokuStrategyAgent,
 } from '@/games/gomoku/ai/strategy/gomokuAgent'
-import { validateGomokuTacticalGate } from '@/games/gomoku/ai/strategy/tacticalGate'
+import {
+  validateGomokuTacticalGate,
+  verifyGomokuAgentDecisionSafety,
+} from '@/games/gomoku/ai/strategy/tacticalGate'
 import {
   buildStrategyCandidateSet,
   strategyCandidateAsSearched,
@@ -29,6 +32,7 @@ import {
   recordGameAnomaly,
   recordGameMove,
   revertSessionMovesAfter,
+  runSessionAgentPostmortem,
   saveReviewSummary,
   startSessionGame,
   type AIDecisionSource,
@@ -249,7 +253,10 @@ function finishMove(row: number, col: number, mover: Player): boolean {
   result.value = resultAfterMove(board.value, row, col)
   if (result.value) {
     phase.value = 'gameOver'
-    if (experienceGameId) finishSessionGame(experienceGameId, result.value, moves.value)
+    if (experienceGameId) {
+      finishSessionGame(experienceGameId, result.value, moves.value)
+      void runSessionAgentPostmortem(experienceGameId)
+    }
     clearHint()
     void runReview()
     return true
@@ -418,10 +425,18 @@ async function runAITurn() {
       const agentResult = await runGomokuStrategyAgent(context, controller.signal, contextIsCurrent)
       if (!contextIsCurrent()) return
       const toolNames = agentResult.trace.toolCalls.map((call) => call.name)
-      const gateReason =
+      let gateReason =
         agentResult.source === 'agent'
           ? validateGomokuTacticalGate(agentResult.decision, context)
           : null
+      if (agentResult.source === 'agent' && !gateReason) {
+        gateReason = await verifyGomokuAgentDecisionSafety(
+          agentResult.decision,
+          context,
+          controller.signal,
+        )
+        if (!contextIsCurrent()) return
+      }
       const decision = gateReason ? createGomokuFallback(context, gateReason) : agentResult.decision
       const decisionSource = gateReason ? 'fallback' : agentResult.source
       const fallbackReason = gateReason ?? agentResult.trace.fallbackReason

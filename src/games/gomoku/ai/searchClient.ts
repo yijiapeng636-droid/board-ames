@@ -1,6 +1,7 @@
 import type { SearchWorkerRequest, SearchWorkerResponse } from '@/games/gomoku/ai/search.worker'
 import type { SearchOptions } from '@/games/gomoku/ai/search'
 import type { Board, FixedCandidateSearchResult, Player, SearchResult } from '@/games/gomoku/types/gomoku'
+import { postWorkerData } from '@/workerData'
 
 let nextRequestId = 1
 
@@ -24,7 +25,12 @@ function executeWorker(request: WorkerRequestWithoutId, signal?: AbortSignal): P
       else reject(new Error(event.data.error))
     })
     const payload = { ...request, id, board: request.board.map((line) => [...line]) } satisfies SearchWorkerRequest
-    worker.postMessage(payload)
+    try {
+      postWorkerData(worker, payload, '五子棋搜索')
+    } catch (error) {
+      cleanup()
+      reject(error)
+    }
   })
 }
 

@@ -204,4 +204,93 @@ describe('persistent Gomoku game history', () => {
       summary: 'late diagnostic reviewed',
     })
   })
+
+  it('revises the retrospective when postgame analysis adds a new anomaly', async () => {
+    let reviewCalls = 0
+    const history = createGameHistoryService({
+      storage: memoryStorage(),
+      now: () => 600,
+      id: () => 'game-6',
+      reviewAnomalies: async (game) => {
+        reviewCalls += 1
+        return {
+          summary: `review-${reviewCalls}`,
+          anomalyIds: game.anomalies.map((anomaly) => anomaly.id),
+          lessons: [`lesson-${reviewCalls}`],
+          followUps: [],
+        }
+      },
+    })
+    await history.load()
+    const gameId = history.startGame({ humanPlayer: 1, aiPlayer: 2 })
+
+    history.recordAnomaly(gameId, {
+      subsystem: 'agent',
+      stage: 'model_request',
+      code: 'model_timeout',
+      message: 'timeout',
+      recoverable: true,
+    })
+    history.finishGame(gameId, 'blackWin')
+    await history.flush()
+
+    history.recordAnomalies(gameId, [
+      {
+        subsystem: 'agent_learning',
+        stage: 'postgame_analysis',
+        code: 'missed_critical_defense',
+        message: 'AI ignored a required defense',
+        moveNumber: 12,
+        recoverable: false,
+        severity: 'critical',
+        positionKey: 'position-12',
+        evidence: ['defense_urgency:nextTurnFork'],
+      },
+    ])
+    await history.flush()
+
+    expect(reviewCalls).toBe(2)
+    expect(history.getGames()[0]?.retrospective).toMatchObject({
+      status: 'completed',
+      revision: 2,
+      summary: 'review-2',
+      reviewedAnomalyIds: ['game-6:anomaly:1', 'game-6:anomaly:2'],
+    })
+  })
+
+  it('links an AI decision to the persisted move event', async () => {
+    const history = createGameHistoryService({
+      storage: memoryStorage(),
+      now: () => 700,
+      id: () => 'game-7',
+    })
+    await history.load()
+    const gameId = history.startGame({ humanPlayer: 1, aiPlayer: 2 })
+    const aiMove = {
+      turn: 2,
+      player: 2 as const,
+      row: 7,
+      col: 8,
+    }
+
+    history.recordMove(gameId, {
+      ...aiMove,
+      phase: 'aiThinking',
+    })
+    history.recordAIDecision(
+      gameId,
+      {
+        positionKey: 'position',
+        selectedMove: { row: 7, col: 8 },
+        source: 'deepseek',
+      },
+      aiMove,
+    )
+
+    expect(history.getGames()[0]?.aiDecisions[0]).toMatchObject({
+      moveId: 'game-7:move:1',
+      moveNumber: 2,
+      selectedMove: { row: 7, col: 8 },
+    })
+  })
 })

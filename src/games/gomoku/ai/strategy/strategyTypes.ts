@@ -17,6 +17,7 @@ export interface StrategyPosition {
   row: number
   col: number
 }
+export type DefenseUrgency = 'none' | 'immediateWin' | 'multipleImmediateWins' | 'nextTurnFork'
 export interface StrategyCandidate extends StrategyPosition {
   attackScore: number
   defenseScore: number
@@ -39,7 +40,12 @@ export interface PositionInspection {
   aiPlayer: 'black' | 'white'
   immediateWins: StrategyPosition[]
   opponentImmediateWins: StrategyPosition[]
-  mandatoryDefense: { required: boolean; moves: StrategyPosition[] }
+  mandatoryDefense: {
+    required: boolean
+    urgency: DefenseUrgency
+    unavoidable: boolean
+    moves: StrategyPosition[]
+  }
   forcingMoves: StrategyPosition[]
   opponentForcingMoves: StrategyPosition[]
 }

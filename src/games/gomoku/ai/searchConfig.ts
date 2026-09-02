@@ -5,6 +5,7 @@ export const SEARCH_CONFIG = {
   finalCandidateLimit: 5,
   // Initial engineering cap for strategic breadth; benchmark tuning may change it later.
   strategyCandidateLimit: 12,
+  agentAcceptableScoreMargin: 5_000,
   maxDepth: 3,
   maxMs: 1_200,
   threatMaxPly: 9,

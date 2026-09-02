@@ -52,6 +52,23 @@ describe('xiangqi training flow', () => {
     await expect(requestXiangqiMove(createInitialXiangqiBoard(), [], 'red', candidates, null)).rejects.toThrow('候选列表之外')
   })
 
+  it('replaces an English DeepSeek explanation with a Chinese local explanation', async () => {
+    const candidates = searchXiangqi(createInitialXiangqiBoard(), 'red', { maxDepth: 1, timeBudgetMs: 500 }).candidates.slice(0, 2)
+    const candidate = candidates[0]!
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        from: candidate.from,
+        to: candidate.to,
+        reason: 'Best move with highest score in searched candidates.',
+      }),
+    }))
+
+    const result = await requestXiangqiMove(createInitialXiangqiBoard(), [], 'red', candidates, null)
+    expect(result.reason).toMatch(/[\u3400-\u9fff]/u)
+    expect(result.reason).not.toContain('Best move')
+  })
+
   it('does not expose an undo checkpoint that restores AI red before its opening move', async () => {
     vi.stubGlobal('Worker', ImmediateSearchWorker)
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ from: { row: 4, col: 4 }, to: { row: 4, col: 5 }, reason: 'invalid' }) }))
@@ -59,6 +76,8 @@ describe('xiangqi training flow', () => {
     await wrapper.findAll('button').find((button) => button.text() === '开始对局')!.trigger('click')
     await wrapper.findAll('[role="dialog"] button')[0]!.trigger('click')
     await vi.waitFor(() => expect(wrapper.text()).toContain('黑方行棋'))
+    expect(wrapper.text()).toContain('棋例分类：闲')
+    expect(wrapper.text()).not.toContain('idle')
     expect(wrapper.findAll('button').find((button) => button.text() === '悔棋')!.attributes('disabled')).toBeDefined()
   })
 })

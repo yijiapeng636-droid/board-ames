@@ -13,7 +13,9 @@ const PATTERN_SCORES: Record<PatternName, number> = {
   five: 1_000_000,
   openFour: 100_000,
   closedFour: 30_000,
+  brokenFour: 30_000,
   openThree: 8_000,
+  brokenThree: 8_000,
   closedThree: 1_200,
   openTwo: 400,
 }
@@ -34,8 +36,12 @@ export function analyzeMovePatterns(
 
 function summarizePatterns(patterns: DirectionPattern[]) {
   const names = patterns.flatMap(({ pattern }) => (pattern ? [pattern] : []))
-  const fourCount = names.filter((name) => name === 'openFour' || name === 'closedFour').length
-  const threeCount = names.filter((name) => name === 'openThree').length
+  const fourCount = names.filter((name) =>
+    ['openFour', 'closedFour', 'brokenFour'].includes(name),
+  ).length
+  const threeCount = names.filter((name) =>
+    ['openThree', 'brokenThree'].includes(name),
+  ).length
   return {
     names,
     score: names.reduce((total, name) => total + PATTERN_SCORES[name], 0),
@@ -80,8 +86,18 @@ export function evaluateCandidate(
   player: Player,
 ): AICandidate {
   const opponent: Player = player === 1 ? 2 : 1
-  const attackThreat = analyzeThreat(board, { row, col }, player)
-  const defenseThreat = analyzeThreat(board, { row, col }, opponent)
+  const attackThreat = analyzeThreat(
+    board,
+    { row, col },
+    player,
+    { includeDefenseSquares: false },
+  )
+  const defenseThreat = analyzeThreat(
+    board,
+    { row, col },
+    opponent,
+    { includeDefenseSquares: false },
+  )
   const attack = summarizePatterns(attackThreat.directions)
   const defense = summarizePatterns(defenseThreat.directions)
   const features = new Set<string>(attack.names)
@@ -114,7 +130,9 @@ export function evaluateCandidate(
     !immediateWin &&
     !createsDoubleThreat &&
     !createsFourThree &&
-    !attack.names.some((name) => ['openFour', 'closedFour', 'openThree'].includes(name))
+    !attack.names.some((name) =>
+      ['openFour', 'closedFour', 'brokenFour', 'openThree', 'brokenThree'].includes(name),
+    )
   return {
     row,
     col,
@@ -143,6 +161,8 @@ function isProtected(candidate: AICandidate) {
     'blockOpenFour',
     'closedFour',
     'blockClosedFour',
+    'brokenFour',
+    'blockBrokenFour',
     'doubleThreat',
     'fourThree',
   ]

@@ -1,6 +1,7 @@
 import type { ThreatSearchOptions, ThreatSearchResult } from '@/games/gomoku/ai/threatSearch'
 import type { StrategySearchRequest, StrategySearchResponse } from '@/games/gomoku/ai/strategy/strategySearch.worker'
 import type { Board, Player } from '@/games/gomoku/types/gomoku'
+import { postWorkerData } from '@/workerData'
 
 let nextId = 1
 
@@ -25,7 +26,12 @@ function executeThreatWorker(
       else reject(new Error(event.data.error))
     })
     worker.addEventListener('error', () => { cleanup(); reject(new Error('威胁搜索 Worker 执行失败')) }, { once: true })
-    worker.postMessage({ id, board: board.map((line) => [...line]), player, ...(move ? { move: { ...move } } : {}), options } satisfies StrategySearchRequest)
+    try {
+      postWorkerData(worker, { id, board, player, ...(move ? { move } : {}), options } satisfies StrategySearchRequest, '五子棋威胁搜索')
+    } catch (error) {
+      cleanup()
+      reject(error)
+    }
   })
 }
 

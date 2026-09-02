@@ -1,8 +1,9 @@
-import { evaluateCandidate, generateCandidatePool, getForcedCandidate } from '@/games/gomoku/ai/candidates'
+import { evaluateCandidate, generateCandidatePool } from '@/games/gomoku/ai/candidates'
 import { evaluatePosition } from '@/games/gomoku/ai/evaluation'
 import { SEARCH_CONFIG, SEARCH_WIN_SCORE } from '@/games/gomoku/ai/searchConfig'
 import { findWinningMoves } from '@/games/gomoku/ai/threatAnalysis'
 import { searchForcedWin } from '@/games/gomoku/ai/threatSearch'
+import { inspectGomokuPosition } from '@/games/gomoku/ai/strategy/positionInspection'
 import { applyTTBound, classifyTTBound, type TTEntry } from '@/games/gomoku/ai/transposition'
 import { isBoardFull } from '@/games/gomoku/core/game'
 import { getWinner } from '@/games/gomoku/core/winner'
@@ -98,7 +99,7 @@ function minimax(board: Board, depth: number, currentPlayer: Player, alphaValue:
   }
   if (effectiveDepth === 0) return { score: evaluatePosition(board, context.rootPlayer, currentPlayer, leafCandidates), line: [], completed: true }
 
-  const candidates = orderedCandidates(board, currentPlayer, context.branchLimit, cached?.bestMove)
+  const candidates = leafCandidates ?? orderedCandidates(board, currentPlayer, context.branchLimit, cached?.bestMove)
   if (candidates.length === 0) return { score: 0, line: [], completed: true }
   const maximizing = currentPlayer === context.rootPlayer
   let bestScore = maximizing ? -Infinity : Infinity
@@ -165,20 +166,30 @@ function findImmediateForcedCandidate(board: Board, rootPlayer: Player): AICandi
   const winningMove = findWinningMoves(board, rootPlayer)[0]
   if (winningMove) return evaluateCandidate(board, winningMove.row, winningMove.col, rootPlayer)
 
-  const blockingMove = findWinningMoves(board, other(rootPlayer))[0]
-  return blockingMove
-    ? evaluateCandidate(board, blockingMove.row, blockingMove.col, rootPlayer)
+  const opponentWinningMoves = findWinningMoves(board, other(rootPlayer))
+  return opponentWinningMoves.length === 1
+    ? evaluateCandidate(board, opponentWinningMoves[0]!.row, opponentWinningMoves[0]!.col, rootPlayer)
     : null
+}
+
+function restrictToCriticalDefense(board: Board, rootPlayer: Player, pool: AICandidate[]) {
+  const defense = inspectGomokuPosition(board, rootPlayer).mandatoryDefense
+  if (defense.urgency !== 'nextTurnFork' || defense.unavoidable) return pool
+  return defense.moves.map((move) =>
+    pool.find((candidate) => candidate.row === move.row && candidate.col === move.col) ??
+    evaluateCandidate(board, move.row, move.col, rootPlayer),
+  )
 }
 
 export function createSafeSearchFallback(board: Board, rootPlayer: Player = 2): SearchResult {
   const started = Date.now()
   const pool = generateCandidatePool(board, rootPlayer)
   const metrics = metricsFor(pool.length)
-  const forced = findImmediateForcedCandidate(board, rootPlayer) ?? getForcedCandidate(pool)
+  const forced = findImmediateForcedCandidate(board, rootPlayer)
   if (forced?.immediateWin) return finishForced(forced, 'forcedWin', rootPlayer, pool, metrics, started)
   if (forced?.blocksImmediateWin) return finishForced(forced, 'forcedBlock', rootPlayer, pool, metrics, started)
-  const candidates = pool.slice(0, SEARCH_CONFIG.finalCandidateLimit).map((item) => asSearched(item, rootPlayer))
+  const safePool = restrictToCriticalDefense(board, rootPlayer, pool)
+  const candidates = safePool.slice(0, SEARCH_CONFIG.finalCandidateLimit).map((item) => asSearched(item, rootPlayer))
   metrics.searchDurationMs = Date.now() - started
   return { candidates, forcedMoveType: null, metrics, trace: traceFor(rootPlayer, pool, metrics, null, candidates, 'fallback') }
 }
@@ -190,7 +201,7 @@ export function searchPosition(boardInput: Board, options: SearchOptions = {}): 
   const board = cloneBoard(boardInput)
   const pool = generateCandidatePool(board, rootPlayer, options.candidatePoolLimit ?? SEARCH_CONFIG.candidatePoolLimit)
   const metrics = metricsFor(pool.length)
-  const immediate = findImmediateForcedCandidate(board, rootPlayer) ?? getForcedCandidate(pool)
+  const immediate = findImmediateForcedCandidate(board, rootPlayer)
   if (immediate?.immediateWin) return finishForced(immediate, 'forcedWin', rootPlayer, pool, metrics, started)
   if (immediate?.blocksImmediateWin) return finishForced(immediate, 'forcedBlock', rootPlayer, pool, metrics, started)
 
@@ -204,7 +215,8 @@ export function searchPosition(boardInput: Board, options: SearchOptions = {}): 
     return { candidates, forcedMoveType: 'forcedTactical', metrics, trace: traceFor(rootPlayer, pool, metrics, 'forcedTactical', candidates, 'forcedWinSearch') }
   }
 
-  let completed = pool.map((item) => asSearched(item, rootPlayer))
+  const rootPool = restrictToCriticalDefense(board, rootPlayer, pool)
+  let completed = rootPool.map((item) => asSearched(item, rootPlayer))
   const context: SearchContext = {
     rootPlayer,
     deadline: started + (options.maxMs ?? SEARCH_CONFIG.maxMs),
@@ -218,7 +230,7 @@ export function searchPosition(boardInput: Board, options: SearchOptions = {}): 
   let previousBest: { row: number; col: number } | undefined
   for (let depth = 1; depth <= maxDepth; depth += 1) {
     const depthResults: SearchedCandidate[] = []
-    const roots = [...pool].sort((a, b) => Number(b.row === previousBest?.row && b.col === previousBest?.col) - Number(a.row === previousBest?.row && a.col === previousBest?.col) || b.orderingScore - a.orderingScore)
+    const roots = [...rootPool].sort((a, b) => Number(b.row === previousBest?.row && b.col === previousBest?.col) - Number(a.row === previousBest?.row && a.col === previousBest?.col) || b.orderingScore - a.orderingScore)
     let layerComplete = true
     for (const candidate of roots) {
       if (Date.now() >= context.deadline) { metrics.timedOut = true; layerComplete = false; break }
@@ -228,7 +240,7 @@ export function searchPosition(boardInput: Board, options: SearchOptions = {}): 
       if (!child.completed) { layerComplete = false; break }
       depthResults.push(asSearched(candidate, rootPlayer, child.score, [{ player: playerName(rootPlayer), row: candidate.row, col: candidate.col }, ...child.line]))
     }
-    if (!layerComplete || depthResults.length !== pool.length) break
+    if (!layerComplete || depthResults.length !== rootPool.length) break
     completed = depthResults.sort((a, b) => b.searchScore - a.searchScore || b.staticScore - a.staticScore)
     previousBest = completed[0] ? { row: completed[0].row, col: completed[0].col } : undefined
     metrics.searchDepth = depth

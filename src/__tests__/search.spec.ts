@@ -52,8 +52,29 @@ describe('search engine', () => {
     const blocking = createBoard()
     for (let col = 3; col < 7; col += 1) winning[7]![col] = 2
     for (let row = 3; row < 7; row += 1) blocking[row]![8] = 1
+    blocking[2]![8] = 2
     expect(searchPosition(winning).forcedMoveType).toBe('forcedWin')
     expect(searchPosition(blocking).forcedMoveType).toBe('forcedBlock')
+  })
+
+  it('does not report a forced block when the opponent has two independent winning squares', () => {
+    const board = createBoard()
+    for (let col = 4; col < 8; col += 1) board[7]![col] = 1
+
+    expect(searchPosition(board, { rootPlayer: 2, maxMs: 0 }).forcedMoveType).toBeNull()
+  })
+
+  it('restricts root candidates to next-turn-fork defenses even when search has no time', () => {
+    const board = createBoard()
+    board[7]![6] = 2
+    board[7]![7] = 2
+    board[7]![8] = 2
+
+    const result = searchPosition(board, { rootPlayer: 1, maxMs: 0 })
+    expect(result.candidates.map(({ row, col }) => [row, col])).toEqual([
+      [7, 5],
+      [7, 9],
+    ])
   })
 
   it('uses multi-ply search to override a lower-quality static ordering and records PV', () => {

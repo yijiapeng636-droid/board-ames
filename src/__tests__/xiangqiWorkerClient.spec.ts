@@ -30,7 +30,34 @@ describe('xiangqi worker clients', () => {
   it('converts a reactive board and search history into cloneable worker data', async () => {
     vi.stubGlobal('Worker', CloneCheckingWorker)
     const board = reactive(createInitialXiangqiBoard())
-    const options = reactive({ maxDepth: 1, timeBudgetMs: 100, positionHistory: [{ key: 'position', sideToMove: 'red' as const, move: null, classification: null }] })
+    const options = reactive({
+      maxDepth: 1,
+      timeBudgetMs: 100,
+      positionHistory: [{
+        key: 'position',
+        sideToMove: 'red' as const,
+        move: null,
+        classification: {
+          side: 'red' as const,
+          effects: ['capture' as const],
+          primaryEffect: 'capture' as const,
+          targetPieceIds: ['black-rook-1'],
+          ruleReference: '24.3',
+          evidence: ['new attack'],
+          chaseEvidence: [{
+            targetPieceId: 'black-rook-1',
+            targetPieceType: 'rook' as const,
+            attackerPieceIds: ['red-cannon-1'],
+            direct: true,
+            joint: false,
+            protected: false,
+            netGain: 1,
+            immediateMateRisk: false,
+          }],
+          forbidden: true,
+        },
+      }],
+    })
 
     await expect(searchXiangqiInWorker(board, 'red', options)).resolves.toMatchObject({ aborted: false })
   })

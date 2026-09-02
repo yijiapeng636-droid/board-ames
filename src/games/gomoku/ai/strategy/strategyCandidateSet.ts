@@ -1,6 +1,7 @@
 import { evaluateCandidate, generateCandidatePool } from '@/games/gomoku/ai/candidates'
 import { SEARCH_CONFIG } from '@/games/gomoku/ai/searchConfig'
 import type { Board, Player, SearchResult, SearchedCandidate } from '@/games/gomoku/types/gomoku'
+import { inspectGomokuPosition } from './positionInspection'
 import type { StrategyCandidate } from './strategyTypes'
 
 function key(move: { row: number; col: number }) { return `${move.row}:${move.col}` }
@@ -12,17 +13,35 @@ export function buildStrategyCandidateSet(
   limit: number = SEARCH_CONFIG.strategyCandidateLimit,
 ): StrategyCandidate[] {
   const pool = generateCandidatePool(board, player, SEARCH_CONFIG.candidatePoolLimit)
+  const inspection = inspectGomokuPosition(board, player)
+  const requiredKeys = new Set([
+    ...inspection.immediateWins,
+    ...inspection.mandatoryDefense.moves,
+  ].map(key))
   const baselineByKey = new Map(baseline.candidates.map((candidate) => [key(candidate), candidate]))
-  const protectedCandidates = pool.filter((candidate) => candidate.immediateWin || candidate.blocksImmediateWin || candidate.forcesReply || candidate.createsDoubleThreat || candidate.createsFourThree)
-  const baselineCandidates = baseline.candidates.flatMap((searched) => {
+  const protectedCandidates = pool.filter((candidate) =>
+    requiredKeys.has(key(candidate)) ||
+    candidate.immediateWin ||
+    candidate.blocksImmediateWin ||
+    candidate.forcesReply ||
+    candidate.createsDoubleThreat ||
+    candidate.createsFourThree,
+  )
+  const bestScore = baseline.candidates[0]?.searchScore
+  const viableBaseline = bestScore === undefined
+    ? []
+    : baseline.candidates.filter((candidate) => candidate.searchScore >= bestScore - SEARCH_CONFIG.agentAcceptableScoreMargin)
+  const baselineCandidates = viableBaseline.flatMap((searched) => {
     const candidate = pool.find((item) => key(item) === key(searched))
     if (candidate) return [candidate]
     return board[searched.row]?.[searched.col] === 0
       ? [evaluateCandidate(board, searched.row, searched.col, player)]
       : []
   })
-  const attackingCandidates = pool.filter((candidate) => candidate.attackScore > 0 && !candidate.pureDefense)
-  const ordered = [...protectedCandidates, ...baselineCandidates, ...attackingCandidates, ...pool]
+  const fallbackPool = baseline.candidates.length === 0
+    ? pool.filter((candidate) => candidate.immediateWin || candidate.blocksImmediateWin || candidate.forcesReply || candidate.createsDoubleThreat || candidate.createsFourThree)
+    : []
+  const ordered = [...protectedCandidates, ...baselineCandidates, ...fallbackPool, ...(baseline.candidates.length === 0 ? pool : [])]
   const unique = new Map<string, (typeof pool)[number]>()
   for (const candidate of ordered) {
     const isProtected = protectedCandidates.includes(candidate)
@@ -32,7 +51,7 @@ export function buildStrategyCandidateSet(
     const baselineCandidate = baselineByKey.get(key(candidate))
     const sources: StrategyCandidate['sources'] = []
     if (candidate.immediateWin) sources.push('immediate_win')
-    if (candidate.blocksImmediateWin) sources.push('mandatory_block')
+    if (candidate.blocksImmediateWin || inspection.mandatoryDefense.moves.some((move) => key(move) === key(candidate))) sources.push('mandatory_block')
     if (candidate.forcesReply || candidate.createsDoubleThreat || candidate.createsFourThree) sources.push('forcing')
     if (baselineCandidate) sources.push('baseline')
     if (candidate.attackScore > 0 && !candidate.pureDefense) sources.push('attacking')

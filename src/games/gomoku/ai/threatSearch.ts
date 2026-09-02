@@ -1,5 +1,6 @@
 import { generateCandidatePool } from '@/games/gomoku/ai/candidates'
 import {
+  analyzeBoardThreat,
   analyzeThreat,
   type ThreatAnalysis,
   type ThreatPosition,
@@ -64,19 +65,38 @@ function proveThreat(
     const defenderWins = generateCandidatePool(board, defender, 24).filter((move) => move.immediateWin)
     if (defenderWins.length > 1) return { win: false, line: [] }
 
+    const threatByMove = new Map<string, ThreatAnalysis>()
+    const lightweightThreat = (move: ThreatPosition) => {
+      const key = moveKey(move)
+      const cached = threatByMove.get(key)
+      if (cached) return cached
+      const analysis = analyzeThreat(board, move, attacker, { includeDefenseSquares: false })
+      threatByMove.set(key, analysis)
+      return analysis
+    }
     const forcing = defenderWins.length === 1
       ? attackerPool.filter((move) => same(move, defenderWins[0]!))
       : attackerPool.filter((move) => {
           if (move.immediateWin || move.forcesReply || move.createsDoubleThreat || move.createsFourThree) return true
-          return analyzeThreat(board, move, attacker).openThrees.length > 0
+          return lightweightThreat(move).threeThreats.length > 0
         })
-
+    const threatPriority = new Map(forcing.map((move) => {
+      const analysis = lightweightThreat(move)
+      return [moveKey(move), analysis.fours.length * 100_000 + analysis.openThrees.length * 10_000 + analysis.brokenThrees.length * 8_000]
+    }))
+    forcing.sort((left, right) =>
+      (threatPriority.get(moveKey(right)) ?? 0) - (threatPriority.get(moveKey(left)) ?? 0) ||
+      right.orderingScore - left.orderingScore,
+    )
     for (const move of forcing) {
       board[move.row]![move.col] = attacker
       const local = analyzeThreat(board, move, attacker)
+      const activeThreat = local.winningMoves.length > 0 || local.defenseSquares.length > 0
+        ? local
+        : analyzeBoardThreat(board, attacker)
       const child = local.winNow
         ? { win: true, line: [] }
-        : prove(defender, ply + 1, local)
+        : prove(defender, ply + 1, activeThreat)
       board[move.row]![move.col] = 0
       if (child.win) {
         return {

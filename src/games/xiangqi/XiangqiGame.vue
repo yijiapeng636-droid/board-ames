@@ -20,10 +20,21 @@ import type {
   XiangqiAdjudication,
   XiangqiBoard as XiangqiBoardState,
   XiangqiMove,
+  XiangqiMoveEffect,
   XiangqiPosition,
   XiangqiPositionHistoryEntry,
   XiangqiSide,
 } from '@/games/xiangqi/types/xiangqi'
+
+const effectLabels: Record<XiangqiMoveEffect, string> = {
+  check: '将',
+  kill: '杀',
+  capture: '捉',
+  exchange: '兑',
+  sacrifice: '献',
+  block: '拦',
+  idle: '闲',
+}
 
 const emit = defineEmits<{ back: [] }>()
 const board = ref(createInitialXiangqiBoard())
@@ -35,6 +46,9 @@ const started = ref(false)
 const choosingSide = ref(false)
 const humanSide = ref<XiangqiSide>('red')
 const busy = ref(false)
+const backgroundTheme = ref<'light' | 'vscode'>('light')
+const boardDisplaySize = ref<'small' | 'medium' | 'large'>('medium')
+const boardPalette = ref<'wood' | 'slate' | 'vscode'>('wood')
 const message = ref('点击“开始对局”选择执棋方。')
 const hintMove = ref<Pick<XiangqiMove, 'from' | 'to'> | null>(null)
 const review = ref<{ summary: string; suggestions: string[] } | null>(null)
@@ -174,7 +188,8 @@ function completeMove(move: XiangqiMove, reason: string) {
     return
   }
   sideToMove.value = nextSide
-  message.value = `${reason}；${classification.primaryEffect}`
+  const displayReason = reason.replace(/[。；，、.!?！？;]+$/u, '')
+  message.value = `${displayReason}；棋例分类：${effectLabels[classification.primaryEffect]}`
   clearSelection(); hintMove.value = null
   if (sideToMove.value === humanSide.value) saveCheckpoint()
   else void nextTick(runAI)
@@ -257,14 +272,24 @@ async function runReview() {
   }
 }
 
+function applyVisualPreset(preset: 'classic' | 'slate' | 'vscode') {
+  backgroundTheme.value = preset === 'classic' ? 'light' : 'vscode'
+  boardPalette.value = preset === 'classic' ? 'wood' : preset
+}
+
 initializeHistory()
 onBeforeUnmount(abortTasks)
 </script>
 
 <template>
+  <div
+    class="app-page"
+    :data-theme="backgroundTheme"
+    :data-stealth="backgroundTheme === 'vscode' && boardPalette === 'vscode'"
+  >
   <main class="xiangqi-game">
     <button type="button" class="back-button" @click="emit('back')">返回首页</button>
-    <h1>中国象棋练习</h1>
+    <h1>{{ backgroundTheme === 'vscode' && boardPalette === 'vscode' ? 'xiangqi.ts' : '中国象棋练习' }}</h1>
     <p v-if="effectiveResult">
       <template v-if="effectiveResult === 'draw'">和棋：{{ adjudication?.reason ?? '双方均无取胜子力' }}</template>
       <template v-else>
@@ -279,6 +304,28 @@ onBeforeUnmount(abortTasks)
       <button type="button" :disabled="checkpoints.length < 2 || busy" @click="undo">悔棋</button>
       <button type="button" :disabled="!started || busy || !!effectiveResult || sideToMove !== humanSide" @click="showHint">最佳提示</button>
       <button type="button" :disabled="!effectiveResult || busy" @click="runReview">赛后复盘</button>
+      <details>
+        <summary>背景组合</summary>
+        <div class="setting-menu">
+          <button type="button" :aria-pressed="backgroundTheme === 'light' && boardPalette === 'wood'" @click="applyVisualPreset('classic')">经典米白 + 木棋盘</button>
+          <button type="button" :aria-pressed="backgroundTheme === 'vscode' && boardPalette === 'slate'" @click="applyVisualPreset('slate')">深色 + 石板棋盘</button>
+          <button type="button" :aria-pressed="backgroundTheme === 'vscode' && boardPalette === 'vscode'" @click="applyVisualPreset('vscode')">VS Code 隐身组合</button>
+        </div>
+      </details>
+      <details>
+        <summary>棋盘颜色</summary>
+        <div class="setting-menu">
+          <button type="button" :aria-pressed="boardPalette === 'wood'" @click="boardPalette = 'wood'">经典木色</button>
+          <button type="button" :aria-pressed="boardPalette === 'slate'" @click="boardPalette = 'slate'">深色石板</button>
+          <button type="button" :aria-pressed="boardPalette === 'vscode'" @click="boardPalette = 'vscode'">VS Code 编辑器色</button>
+        </div>
+      </details>
+      <details>
+        <summary>棋盘大小</summary>
+        <div class="setting-menu size-menu">
+          <button v-for="option in [{ value: 'small', label: '小' }, { value: 'medium', label: '中' }, { value: 'large', label: '大' }] as const" :key="option.value" type="button" :aria-pressed="boardDisplaySize === option.value" @click="boardDisplaySize = option.value">{{ option.label }}</button>
+        </div>
+      </details>
     </div>
     <div class="bonus-actions">
       <button type="button" :disabled="!started || bonus[humanSide] > 0" @click="grantBonus(humanSide)">让玩家一步</button>
@@ -292,6 +339,8 @@ onBeforeUnmount(abortTasks)
         :last-move="lastMove"
         :hint-move="hintMove"
         :checked-general="checkedGeneral"
+        :display-size="boardDisplaySize"
+        :palette="boardPalette"
         @select="handleSelect"
       />
     </div>
@@ -306,9 +355,44 @@ onBeforeUnmount(abortTasks)
       </section>
     </div>
   </main>
+  </div>
 </template>
 
 <style scoped>
+.app-page {
+  --page-bg: #f5f1e8;
+  --page-text: #241b11;
+  --control-bg: #fffaf0;
+  --control-border: #76501f;
+  --panel-bg: #fffaf0;
+  --panel-border: #c8ae86;
+  min-height: 100vh;
+  color: var(--page-text);
+  background: var(--page-bg);
+}
+.app-page[data-theme='vscode'] {
+  --page-bg: #1e1e1e;
+  --page-text: #d4d4d4;
+  --control-bg: #2d2d30;
+  --control-border: #6a6a6a;
+  --panel-bg: #252526;
+  --panel-border: #454545;
+}
+.app-page[data-stealth='true'] {
+  background: linear-gradient(90deg, #181818 0 46px, transparent 46px), var(--page-bg);
+}
+.app-page[data-stealth='true'] .xiangqi-game {
+  font-family: Consolas, 'Courier New', monospace;
+}
+.app-page[data-stealth='true'] h1 {
+  width: fit-content;
+  padding: 0.45rem 1.5rem;
+  border-top: 1px solid #007acc;
+  color: #cccccc;
+  background: #1e1e1e;
+  font-size: 0.9rem;
+  font-weight: 400;
+}
 .xiangqi-game {
   width: min(100% - 2rem, 760px);
   margin: 0 auto;
@@ -319,9 +403,10 @@ onBeforeUnmount(abortTasks)
 }
 .back-button {
   padding: 0.5rem 0.8rem;
-  border: 1px solid #76501f;
+  border: 1px solid var(--control-border);
   border-radius: 6px;
-  background: #fffaf0;
+  color: var(--page-text);
+  background: var(--control-bg);
   cursor: pointer;
 }
 .game-actions,
@@ -333,8 +418,37 @@ onBeforeUnmount(abortTasks)
 }
 .game-actions button,
 .bonus-actions button,
-.side-dialog button {
+.side-dialog button,
+summary {
   padding: 0.5rem 0.8rem;
+  border: 1px solid var(--control-border);
+  border-radius: 6px;
+  color: var(--page-text);
+  background: var(--control-bg);
+  cursor: pointer;
+}
+summary {
+  list-style: none;
+}
+.setting-menu {
+  position: absolute;
+  z-index: 6;
+  display: grid;
+  gap: 0.4rem;
+  margin-top: 0.35rem;
+  padding: 0.5rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: var(--panel-bg);
+  box-shadow: 0 4px 14px rgb(0 0 0 / 22%);
+}
+.size-menu {
+  grid-template-columns: repeat(3, minmax(2.5rem, 1fr));
+}
+.setting-menu button[aria-pressed='true'] {
+  border-color: #3794ff;
+  outline: 2px solid #3794ff;
+  outline-offset: -2px;
 }
 .modal-backdrop {
   position: fixed;
@@ -350,13 +464,13 @@ onBeforeUnmount(abortTasks)
   width: min(90vw, 360px);
   padding: 1.5rem;
   border-radius: 12px;
-  background: #fffaf0;
-  color: #24180d;
+  color: var(--page-text);
+  background: var(--panel-bg);
 }
 .review-panel {
   margin-top: 1rem;
   padding: 1rem;
-  border: 1px solid #76501f;
+  border: 1px solid var(--control-border);
   border-radius: 8px;
 }
 .board-scroll {

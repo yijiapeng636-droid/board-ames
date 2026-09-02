@@ -15,7 +15,13 @@ export async function requestXiangqiMove(board: XiangqiBoard, moves: XiangqiMove
   if (!data || typeof data !== 'object') throw new Error('DeepSeek未返回有效象棋着法')
   const candidate = searchedCandidates.find((item) => sameMove(item, data as Pick<XiangqiMoveOption, 'from' | 'to'>))
   if (!candidate) throw new Error('DeepSeek返回了候选列表之外的着法')
-  return { move: candidate, reason: typeof (data as { reason?: unknown }).reason === 'string' ? (data as { reason: string }).reason : 'DeepSeek从本地合法候选中选择' }
+  const returnedReason = typeof (data as { reason?: unknown }).reason === 'string'
+    ? (data as { reason: string }).reason.trim()
+    : ''
+  const reason = /[\u3400-\u9fff]/u.test(returnedReason) && !/[a-z]{2,}/iu.test(returnedReason)
+    ? returnedReason
+    : `本地搜索认为该着最佳，评分 ${candidate.score}。`
+  return { move: candidate, reason }
 }
 
 export async function requestXiangqiReview(payload: unknown, signal?: AbortSignal): Promise<{ summary: string; suggestions: string[] }> {

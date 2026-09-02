@@ -1,3 +1,5 @@
+import { analyzeAgentPostmortemInWorker } from '@/games/gomoku/ai/agentPostmortemClient'
+import type { AgentPostmortemFinding } from '@/games/gomoku/ai/agentPostmortem'
 import type {
   Board,
   GameResult,
@@ -35,6 +37,11 @@ export interface GameAnomaly {
   recoverable: boolean
   fallbackAction?: string
   unexpected: boolean
+  severity?: 'warning' | 'critical'
+  evidence?: string[]
+  positionKey?: string
+  selectedMove?: { row: number; col: number }
+  recommendedMove?: { row: number; col: number }
 }
 
 export interface GameAnomalyInput {
@@ -45,6 +52,11 @@ export interface GameAnomalyInput {
   moveNumber?: number
   recoverable: boolean
   fallbackAction?: string
+  severity?: 'warning' | 'critical'
+  evidence?: string[]
+  positionKey?: string
+  selectedMove?: { row: number; col: number }
+  recommendedMove?: { row: number; col: number }
 }
 
 export interface HistoricalAnomalySummary {
@@ -61,9 +73,40 @@ export interface GameAnomalyReview {
 }
 
 export type GameAnomalyRetrospective =
-  | { status: 'pending' }
-  | ({ status: 'completed' } & GameAnomalyReview)
-  | { status: 'failed'; error: string; retryable: true }
+  | {
+      status: 'pending'
+      revision?: number
+      reviewingAnomalyIds?: string[]
+    }
+  | ({
+      status: 'completed'
+      revision?: number
+      reviewedAnomalyIds?: string[]
+    } & GameAnomalyReview)
+  | {
+      status: 'failed'
+      revision?: number
+      attemptedAnomalyIds?: string[]
+      error: string
+      retryable: true
+    }
+
+export type AgentPostmortemState =
+  | { status: 'pending'; version: 1; startedAt: number }
+  | {
+      status: 'completed'
+      version: 1
+      startedAt: number
+      completedAt: number
+      findingCount: number
+    }
+  | {
+      status: 'failed'
+      version: 1
+      startedAt: number
+      completedAt: number
+      error: string
+    }
 
 export interface GameHistoryRecord {
   id: string
@@ -84,6 +127,7 @@ export interface GameHistoryRecord {
   anomalies: GameAnomaly[]
   reviewSummary?: ReviewSummary
   retrospective?: GameAnomalyRetrospective
+  agentPostmortem?: AgentPostmortemState
 }
 
 export interface GameHistoryStorage {
@@ -114,23 +158,44 @@ export function createGameHistoryService({
       .replace(/\bsk-[\w-]+/giu, '[redacted]')
 
   const persist = () => {
-    const snapshot = structuredClone(games)
-    writes = writes.then(() => storage.save(snapshot)).catch(() => undefined)
+    writes = writes.then(() => storage.save(structuredClone(games))).catch(() => undefined)
+  }
+
+  const reviewedAnomalyIds = (game: GameHistoryRecord) => {
+    if (game.retrospective?.status !== 'completed') return new Set<string>()
+    return new Set(game.retrospective.reviewedAnomalyIds ?? game.retrospective.anomalyIds)
   }
 
   const scheduleRetrospective = (game: GameHistoryRecord) => {
-    if (!reviewAnomalies || game.anomalies.length === 0 || game.retrospective) return
-    game.retrospective = { status: 'pending' }
+    if (!reviewAnomalies || game.anomalies.length === 0) return
+    if (game.retrospective?.status === 'pending') return
+
+    const reviewed = reviewedAnomalyIds(game)
+    const targetAnomalyIds = game.anomalies.map((anomaly) => anomaly.id)
+    if (targetAnomalyIds.every((anomalyId) => reviewed.has(anomalyId))) return
+
+    const revision = (game.retrospective?.revision ?? 0) + 1
+    game.retrospective = {
+      status: 'pending',
+      revision,
+      reviewingAnomalyIds: [...targetAnomalyIds],
+    }
     persist()
+
     writes = writes.then(async () => {
+      const snapshot = structuredClone(game)
+
       try {
-        const review = await reviewAnomalies(structuredClone(game))
-        const validIds = new Set(game.anomalies.map((anomaly) => anomaly.id))
+        const review = await reviewAnomalies(snapshot)
+        const validIds = new Set(snapshot.anomalies.map((anomaly) => anomaly.id))
         if (!review.anomalyIds.every((anomalyId) => validIds.has(anomalyId))) {
           throw new Error('Anomaly review referenced an unknown anomaly')
         }
+
         game.retrospective = {
           status: 'completed',
+          revision,
+          reviewedAnomalyIds: [...targetAnomalyIds],
           summary: sanitize(review.summary),
           anomalyIds: [...new Set(review.anomalyIds)],
           lessons: review.lessons.slice(0, 6).map(sanitize),
@@ -139,12 +204,57 @@ export function createGameHistoryService({
       } catch (error) {
         game.retrospective = {
           status: 'failed',
+          revision,
+          attemptedAnomalyIds: [...targetAnomalyIds],
           error: sanitize(error instanceof Error ? error.message : 'Anomaly review failed'),
           retryable: true,
         }
       }
+
       await storage.save(structuredClone(games)).catch(() => undefined)
+
+      const completed = game.retrospective
+      if (completed.status === 'completed') {
+        const reviewedNow = new Set(completed.reviewedAnomalyIds ?? completed.anomalyIds)
+        if (game.anomalies.some((anomaly) => !reviewedNow.has(anomaly.id))) {
+          scheduleRetrospective(game)
+        }
+      }
     })
+  }
+
+  const appendAnomalies = (gameId: string, inputs: readonly GameAnomalyInput[]) => {
+    const game = games.find((candidate) => candidate.id === gameId)
+    if (!game || inputs.length === 0) return
+
+    let changed = false
+
+    for (const input of inputs) {
+      const duplicate = game.anomalies.some(
+        (anomaly) =>
+          anomaly.subsystem === input.subsystem &&
+          anomaly.stage === input.stage &&
+          anomaly.code === input.code &&
+          anomaly.moveNumber === input.moveNumber &&
+          anomaly.positionKey === input.positionKey,
+      )
+      if (duplicate) continue
+
+      game.anomalies.push({
+        ...structuredClone(input),
+        id: `${gameId}:anomaly:${game.anomalies.length + 1}`,
+        occurredAt: now(),
+        message: sanitize(input.message),
+        evidence: input.evidence?.slice(0, 12).map(sanitize),
+        fingerprint: `${input.subsystem}:${input.stage}:${input.code}`,
+        unexpected: true,
+      })
+      changed = true
+    }
+
+    if (!changed) return
+    persist()
+    if (game.status !== 'active') scheduleRetrospective(game)
   }
 
   return {
@@ -161,9 +271,7 @@ export function createGameHistoryService({
           anomalies: game.anomalies ?? [],
         }
       })
-      games = [
-        ...new Map([...loadedGames, ...games].map((game) => [game.id, game])).values(),
-      ]
+      games = [...new Map([...loadedGames, ...games].map((game) => [game.id, game])).values()]
       if (recovered) persist()
     },
     startGame(input: { humanPlayer: Player; aiPlayer: Player }) {
@@ -194,10 +302,29 @@ export function createGameHistoryService({
       })
       persist()
     },
-    recordAIDecision(gameId: string, decision: AIDecisionRecord) {
+    recordAIDecision(gameId: string, decision: AIDecisionRecord, move?: Move) {
       const game = games.find((candidate) => candidate.id === gameId)
       if (!game || game.status !== 'active') return
-      game.aiDecisions.push(structuredClone(decision))
+
+      const linkedMove = move
+        ? [...game.moves]
+            .reverse()
+            .find(
+              (candidate) =>
+                candidate.revertedAt === undefined &&
+                candidate.turn === move.turn &&
+                candidate.player === move.player &&
+                candidate.row === move.row &&
+                candidate.col === move.col,
+            )
+        : undefined
+
+      game.aiDecisions.push({
+        ...structuredClone(decision),
+        id: decision.id ?? `${gameId}:decision:${game.aiDecisions.length + 1}`,
+        occurredAt: decision.occurredAt ?? now(),
+        ...(linkedMove ? { moveId: linkedMove.id, moveNumber: linkedMove.turn } : {}),
+      })
       persist()
     },
     recordAIDiagnostic(gameId: string, diagnostic: GomokuAIDiagnostic) {
@@ -219,18 +346,16 @@ export function createGameHistoryService({
       persist()
     },
     recordAnomaly(gameId: string, input: GameAnomalyInput) {
+      appendAnomalies(gameId, [input])
+    },
+    recordAnomalies(gameId: string, inputs: readonly GameAnomalyInput[]) {
+      appendAnomalies(gameId, inputs)
+    },
+    setAgentPostmortem(gameId: string, state: AgentPostmortemState) {
       const game = games.find((candidate) => candidate.id === gameId)
       if (!game) return
-      game.anomalies.push({
-        ...input,
-        id: `${gameId}:anomaly:${game.anomalies.length + 1}`,
-        occurredAt: now(),
-        message: sanitize(input.message),
-        fingerprint: `${input.subsystem}:${input.stage}:${input.code}`,
-        unexpected: true,
-      })
+      game.agentPostmortem = structuredClone(state)
       persist()
-      if (game.status !== 'active') scheduleRetrospective(game)
     },
     queryAnomalies(
       input: { subsystem?: string; stage?: string; fingerprint?: string; limit?: number } = {},
@@ -319,6 +444,10 @@ export function createGameHistoryService({
 }
 
 export interface AIDecisionRecord {
+  id?: string
+  moveId?: string
+  moveNumber?: number
+  occurredAt?: number
   positionKey: string
   selectedMove: { row: number; col: number }
   searchScore?: number
@@ -363,6 +492,96 @@ export function createIndexedDbGameHistoryStorage(
         transaction.onerror = () => reject(transaction.error)
         transaction.onabort = () => reject(transaction.error)
       })
+    },
+  }
+}
+
+export function createHttpGameHistoryStorage(
+  fetcher: typeof globalThis.fetch | undefined = globalThis.fetch,
+  endpoint = '/api/history/games',
+): GameHistoryStorage {
+  if (!fetcher) {
+    return {
+      load: async () => [],
+      save: async () => undefined,
+    }
+  }
+
+  return {
+    async load() {
+      const response = await fetcher(endpoint, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+      })
+
+      if (!response.ok) {
+        throw new Error(`SQLite 历史读取失败（HTTP ${response.status}）`)
+      }
+
+      const payload: unknown = await response.json()
+
+      if (
+        !payload ||
+        typeof payload !== 'object' ||
+        !Array.isArray((payload as { games?: unknown }).games)
+      ) {
+        throw new Error('SQLite 历史响应格式无效')
+      }
+
+      return (payload as { games: unknown[] }).games.filter(isGameHistoryRecord)
+    },
+
+    async save(records) {
+      const response = await fetcher(endpoint, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ games: records }),
+      })
+
+      if (!response.ok) {
+        throw new Error(`SQLite 历史保存失败（HTTP ${response.status}）`)
+      }
+    },
+  }
+}
+
+export function createMirroredGameHistoryStorage(
+  primary: GameHistoryStorage,
+  cache: GameHistoryStorage,
+): GameHistoryStorage {
+  return {
+    async load() {
+      const [primaryResult, cacheResult] = await Promise.allSettled([primary.load(), cache.load()])
+
+      const primaryGames = primaryResult.status === 'fulfilled' ? primaryResult.value : []
+      const cachedGames = cacheResult.status === 'fulfilled' ? cacheResult.value : []
+
+      const merged = [
+        ...new Map([...cachedGames, ...primaryGames].map((game) => [game.id, game])).values(),
+      ]
+
+      if (merged.length > 0) {
+        await Promise.allSettled([
+          primary.save(structuredClone(merged)),
+          cache.save(structuredClone(merged)),
+        ])
+      }
+
+      return merged
+    },
+
+    async save(records) {
+      const results = await Promise.allSettled([primary.save(records), cache.save(records)])
+
+      if (results.every((result) => result.status === 'rejected')) {
+        const firstError = results.find(
+          (result): result is PromiseRejectedResult => result.status === 'rejected',
+        )
+
+        throw firstError?.reason instanceof Error
+          ? firstError.reason
+          : new Error('棋局历史保存失败')
+      }
     },
   }
 }
@@ -471,14 +690,23 @@ async function requestGameAnomalyReview(game: GameHistoryRecord): Promise<GameAn
 }
 
 const indexedDbStorage = createIndexedDbGameHistoryStorage()
+const sqliteStorage = createHttpGameHistoryStorage()
+const durableHistoryStorage = createMirroredGameHistoryStorage(sqliteStorage, indexedDbStorage)
+
 const defaultHistory = createGameHistoryService({
   storage: {
     async load() {
-      const persisted = await indexedDbStorage.load()
+      const persisted = await durableHistoryStorage.load()
       const merged = new Map([...persisted, ...legacySessionGames()].map((game) => [game.id, game]))
-      return [...merged.values()]
+      const records = [...merged.values()]
+
+      if (records.length > 0) {
+        await durableHistoryStorage.save(records).catch(() => undefined)
+      }
+
+      return records
     },
-    save: (games) => indexedDbStorage.save(games),
+    save: (games) => durableHistoryStorage.save(games),
   },
   reviewAnomalies: requestGameAnomalyReview,
 })
@@ -500,8 +728,7 @@ export function startSessionGame(initialMoves: Move[] = [], aiPlayer: Player = 2
 }
 
 export function recordAIDecision(gameId: string, decision: AIDecisionRecord, moves: Move[]) {
-  void moves
-  defaultHistory.recordAIDecision(gameId, decision)
+  defaultHistory.recordAIDecision(gameId, decision, moves[moves.length - 1])
 }
 
 export function finishSessionGame(
@@ -551,15 +778,23 @@ export function getSessionReviewHistorySummary(): SessionReviewHistorySummary {
 }
 
 export function getPositionExperience(positionKey: string): PositionExperienceSummary | undefined {
-  const related = defaultHistory
-    .getGames()
-    .flatMap((game) =>
-      game.result && (!sessionExperienceGameIds || sessionExperienceGameIds.has(game.id))
-        ? game.aiDecisions
-            .filter((decision) => decision.positionKey === positionKey)
-            .map((decision) => ({ game, decision }))
-        : [],
+  const related = defaultHistory.getGames().flatMap((game) => {
+    if (!game.result || (sessionExperienceGameIds && !sessionExperienceGameIds.has(game.id))) {
+      return []
+    }
+
+    const activeMoveIds = new Set(
+      game.moves.filter((move) => move.revertedAt === undefined).map((move) => move.id),
     )
+
+    return game.aiDecisions
+      .filter(
+        (decision) =>
+          decision.positionKey === positionKey &&
+          (decision.moveId === undefined || activeMoveIds.has(decision.moveId)),
+      )
+      .map((decision) => ({ game, decision }))
+  })
   if (related.length === 0) return undefined
 
   const moveStats = new Map<string, PositionExperienceSummary['moves'][number]>()
@@ -595,6 +830,78 @@ export function decisionFromCandidate(
     localBestMove: { row: localBest.row, col: localBest.col },
     localBestScore: localBest.searchScore,
     source,
+  }
+}
+
+function postmortemFindingAsAnomaly(finding: AgentPostmortemFinding): GameAnomalyInput {
+  return {
+    subsystem: 'agent_learning',
+    stage: 'postgame_analysis',
+    code: finding.code,
+    message: finding.message,
+    moveNumber: finding.moveNumber,
+    recoverable: false,
+    severity: finding.severity,
+    evidence: [...finding.evidence],
+    positionKey: finding.positionKey,
+    selectedMove: { ...finding.selectedMove },
+    ...(finding.recommendedMove ? { recommendedMove: { ...finding.recommendedMove } } : {}),
+  }
+}
+
+export async function runSessionAgentPostmortem(gameId: string) {
+  const game = defaultHistory.getGames().find((record) => record.id === gameId)
+  if (!game || game.status !== 'completed') return
+  if (game.agentPostmortem?.status === 'pending' || game.agentPostmortem?.status === 'completed') {
+    return
+  }
+
+  const startedAt = Date.now()
+  defaultHistory.setAgentPostmortem(gameId, {
+    status: 'pending',
+    version: 1,
+    startedAt,
+  })
+
+  try {
+    const activeMoveIds = new Set(
+      game.moves.filter((move) => move.revertedAt === undefined).map((move) => move.id),
+    )
+    const findings = await analyzeAgentPostmortemInWorker({
+      aiPlayer: game.aiPlayer,
+      result: game.result,
+      moves: game.moves.map((move) => ({ ...move })),
+      aiDecisions: game.aiDecisions
+        .filter((decision) => decision.moveId === undefined || activeMoveIds.has(decision.moveId))
+        .map((decision) => structuredClone(decision)),
+      aiDiagnostics: game.aiDiagnostics.map((diagnostic) => structuredClone(diagnostic)),
+    })
+
+    defaultHistory.recordAnomalies(gameId, findings.map(postmortemFindingAsAnomaly))
+    defaultHistory.setAgentPostmortem(gameId, {
+      status: 'completed',
+      version: 1,
+      startedAt,
+      completedAt: Date.now(),
+      findingCount: findings.length,
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Agent 局后分析失败'
+    defaultHistory.setAgentPostmortem(gameId, {
+      status: 'failed',
+      version: 1,
+      startedAt,
+      completedAt: Date.now(),
+      error: message,
+    })
+    defaultHistory.recordAnomaly(gameId, {
+      subsystem: 'agent_learning',
+      stage: 'postgame_analysis',
+      code: 'agent_postmortem_failed',
+      message,
+      recoverable: true,
+      fallbackAction: 'retain-game-history',
+    })
   }
 }
 

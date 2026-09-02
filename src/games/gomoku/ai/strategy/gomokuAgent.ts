@@ -87,12 +87,30 @@ export function createGomokuFallback(
   context: GomokuAgentContext,
   reason: AgentFallbackReason,
 ): GomokuStrategyDecision {
-  const best = context.baselineSearch.candidates[0]
+  const baselineBest = context.baselineSearch.candidates[0]
+  const immediate = context.positionInspection.immediateWins[0]
+  const forcedAttack = context.baselineSearch.forcedMoveType === 'forcedWin' || context.baselineSearch.forcedMoveType === 'forcedTactical'
+    ? baselineBest
+    : undefined
+  const forcedDefense = context.baselineSearch.forcedMoveType === 'forcedBlock'
+    ? baselineBest
+    : undefined
+  const defenses = context.positionInspection.mandatoryDefense.moves
+  const defense = defenses.length > 0
+    ? context.baselineSearch.candidates.find((candidate) =>
+        defenses.some((move) => move.row === candidate.row && move.col === candidate.col),
+      ) ?? defenses[0]
+    : undefined
+  const best = immediate ?? forcedAttack ?? forcedDefense ?? defense ?? baselineBest
   if (!best) throw new Error('No local fallback candidate is available')
   return {
     row: best.row,
     col: best.col,
-    strategy: 'positional',
+    strategy: immediate || forcedAttack
+      ? 'forced_attack'
+      : forcedDefense || defense
+        ? 'mandatory_defense'
+        : 'positional',
     reason: 'AI 已改用本地搜索结果完成落子。',
     evidence: [`本地基准搜索回退：${reason}`],
   }

@@ -1,5 +1,6 @@
 import type { ReviewWorkerRequest, ReviewWorkerResponse } from '@/games/gomoku/ai/review.worker'
 import type { Move, Player, ReviewPoint } from '@/games/gomoku/types/gomoku'
+import { postWorkerData } from '@/workerData'
 
 let nextRequestId = 1
 
@@ -39,6 +40,11 @@ export function analyzeReview(
       moves: moves.map((move) => ({ ...move })),
       humanPlayer,
     }
-    worker.postMessage(request)
+    try {
+      postWorkerData(worker, request, '五子棋复盘')
+    } catch (error) {
+      cleanup()
+      reject(error)
+    }
   })
 }
