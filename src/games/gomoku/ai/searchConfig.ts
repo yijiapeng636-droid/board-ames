@@ -16,3 +16,14 @@ export const SEARCH_CONFIG = {
 } as const
 
 export const SEARCH_WIN_SCORE = 100_000_000
+
+export const PATTERN_SCORES = {
+  five: SEARCH_WIN_SCORE,
+  openFour: 400_000,
+  closedFour: 90_000,
+  brokenFour: 90_000,
+  openThree: 14_000,
+  brokenThree: 14_000,
+  closedThree: 2_200,
+  openTwo: 500,
+} as const

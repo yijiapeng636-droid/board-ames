@@ -52,7 +52,7 @@ function diagnostic(turn: number, input: Partial<GomokuAIDiagnostic> = {}): Gomo
     agentTotalDurationMs: 10,
     agentDirectFinal: true,
     finalMove: { row: 0, col: 0 },
-    finalSource: 'agent',
+    finalSource: 'deepseek',
     ...input,
   }
 }

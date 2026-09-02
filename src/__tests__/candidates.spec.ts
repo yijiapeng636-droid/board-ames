@@ -1,15 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import {
-  analyzeMovePatterns,
-  generateCandidatePool,
-  generateCandidates,
-  getForcedCandidate,
-} from '@/games/gomoku/ai/candidates'
+import { analyzeMovePatterns, generateCandidatePool } from '@/games/gomoku/ai/candidates'
 import { createBoard } from '@/games/gomoku/core/game'
 
 describe('AI candidates', () => {
   it('starts from the center on an empty board', () => {
-    const candidates = generateCandidates(createBoard())
+    const candidates = generateCandidatePool(createBoard(), 2, 10)
     expect(candidates).toHaveLength(1)
     expect(candidates[0]).toMatchObject({ row: 7, col: 7, features: ['positional'] })
     expect(candidates[0]!.score).toBeGreaterThan(0)
@@ -18,15 +13,16 @@ describe('AI candidates', () => {
   it('prioritizes an immediate white win', () => {
     const board = createBoard()
     for (let col = 3; col < 7; col += 1) board[7]![col] = 2
-    const candidates = generateCandidates(board)
+    const candidates = generateCandidatePool(board, 2, 10)
     expect(candidates[0]?.features).toContain('five')
-    expect(getForcedCandidate(candidates)?.features).toContain('five')
   })
 
   it('blocks an immediate black win when white cannot win immediately', () => {
     const board = createBoard()
     for (let row = 4; row < 8; row += 1) board[row]![10] = 1
-    const forced = getForcedCandidate(generateCandidates(board))
+    const forced = generateCandidatePool(board, 2, 10).find(
+      (candidate) => candidate.blocksImmediateWin,
+    )
     expect(forced?.features).toContain('blockFive')
     expect([
       [3, 10],
@@ -37,7 +33,7 @@ describe('AI candidates', () => {
   it('returns only legal nearby positions sorted by score', () => {
     const board = createBoard()
     board[7]![7] = 1
-    const candidates = generateCandidates(board, 6)
+    const candidates = generateCandidatePool(board, 2, 6)
     expect(candidates).toHaveLength(6)
     expect(candidates.every(({ row, col }) => board[row]?.[col] === 0)).toBe(true)
     expect(
@@ -53,7 +49,9 @@ describe('AI candidates', () => {
     board[7]![6] = 2
     board[5]![7] = 2
     board[6]![7] = 2
-    const candidate = generateCandidates(board, 20).find(({ row, col }) => row === 7 && col === 7)
+    const candidate = generateCandidatePool(board, 2, 20).find(
+      ({ row, col }) => row === 7 && col === 7,
+    )
     expect(candidate?.features).toContain('doubleThreat')
     expect(
       analyzeMovePatterns(board, 7, 7, 2).filter(({ pattern }) => pattern === 'openThree'),

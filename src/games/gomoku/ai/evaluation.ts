@@ -1,7 +1,14 @@
-import { SEARCH_WIN_SCORE } from '@/games/gomoku/ai/searchConfig'
+import { PATTERN_SCORES, SEARCH_WIN_SCORE } from '@/games/gomoku/ai/searchConfig'
 import { getNearbyEmptyCells } from '@/games/gomoku/ai/candidates'
 import { analyzeBoardThreat, analyzeThreat } from '@/games/gomoku/ai/threatAnalysis'
-import { BOARD_SIZE, type AICandidate, type Board, type Player } from '@/games/gomoku/types/gomoku'
+import {
+  BOARD_CENTER,
+  BOARD_LAST_INDEX,
+  BOARD_SIZE,
+  type AICandidate,
+  type Board,
+  type Player,
+} from '@/games/gomoku/types/gomoku'
 
 export interface PositionFacts {
   five: number
@@ -24,14 +31,6 @@ export interface LeafTacticalFacts {
   sameMoveMultiThreats: Array<{ row: number; col: number }>
 }
 
-const STRUCTURE_VALUES = {
-  openFour: 400_000,
-  closedFour: 90_000,
-  openThree: 14_000,
-  closedThree: 2_200,
-  openTwo: 500,
-} as const
-
 const TACTICAL_DIRECTIONS = [
   [0, 1],
   [1, 0],
@@ -52,12 +51,18 @@ function hasThreatSupport(board: Board, row: number, col: number, player: Player
 }
 
 export function inspectPlayerPosition(board: Board, player: Player): PositionFacts {
-  const facts: PositionFacts = { five: 0, openFour: 0, closedFour: 0, openThree: 0, closedThree: 0, openTwo: 0, forcingLines: 0, multiThreat: false, connectionScore: 0 }
-  const threat = analyzeBoardThreat(
-    board,
-    player,
-    { includeDefenseSquares: false },
-  )
+  const facts: PositionFacts = {
+    five: 0,
+    openFour: 0,
+    closedFour: 0,
+    openThree: 0,
+    closedThree: 0,
+    openTwo: 0,
+    forcingLines: 0,
+    multiThreat: false,
+    connectionScore: 0,
+  }
+  const threat = analyzeBoardThreat(board, player, { includeDefenseSquares: false })
   facts.five = threat.fives.length
   facts.openFour = threat.openFours.length
   facts.closedFour = threat.lines.filter(
@@ -70,7 +75,8 @@ export function inspectPlayerPosition(board: Board, player: Player): PositionFac
   for (let row = 0; row < BOARD_SIZE; row += 1) {
     for (let col = 0; col < BOARD_SIZE; col += 1) {
       if (board[row]?.[col] !== player) continue
-      facts.connectionScore += 14 - (Math.abs(row - 7) + Math.abs(col - 7))
+      facts.connectionScore +=
+        BOARD_LAST_INDEX - (Math.abs(row - BOARD_CENTER) + Math.abs(col - BOARD_CENTER))
     }
   }
   facts.forcingLines = facts.openFour + facts.closedFour + facts.openThree
@@ -79,7 +85,12 @@ export function inspectPlayerPosition(board: Board, player: Player): PositionFac
 
 function factsScore(facts: PositionFacts): number {
   if (facts.five > 0) return SEARCH_WIN_SCORE
-  const structure = facts.openFour * STRUCTURE_VALUES.openFour + facts.closedFour * STRUCTURE_VALUES.closedFour + facts.openThree * STRUCTURE_VALUES.openThree + facts.closedThree * STRUCTURE_VALUES.closedThree + facts.openTwo * STRUCTURE_VALUES.openTwo
+  const structure =
+    facts.openFour * PATTERN_SCORES.openFour +
+    facts.closedFour * PATTERN_SCORES.closedFour +
+    facts.openThree * PATTERN_SCORES.openThree +
+    facts.closedThree * PATTERN_SCORES.closedThree +
+    facts.openTwo * PATTERN_SCORES.openTwo
   const multiThreat = facts.multiThreat ? 180_000 : 0
   const constrainedReplies = facts.openFour > 0 ? 40_000 : facts.closedFour > 0 ? 8_000 : 0
   return structure + multiThreat + constrainedReplies + facts.connectionScore
@@ -96,25 +107,26 @@ export function inspectLeafTactics(
     const forcingMoves: Array<{ row: number; col: number }> = []
     const sameMoveMultiThreats: Array<{ row: number; col: number }> = []
     for (const { row, col } of getNearbyEmptyCells(board)) {
-        if (!hasThreatSupport(board, row, col, player)) continue
-        const threat = analyzeThreat(
-          board,
-          { row, col },
-          player,
-          { includeDefenseSquares: false },
-        )
-        const move = { row, col }
-        if (threat.winNow) immediateWins.push(move)
-        if (threat.winNow || threat.fours.length > 0 || threat.doubleThreat) forcingMoves.push(move)
-        if (threat.doubleThreat) sameMoveMultiThreats.push(move)
+      if (!hasThreatSupport(board, row, col, player)) continue
+      const threat = analyzeThreat(board, { row, col }, player, { includeDefenseSquares: false })
+      const move = { row, col }
+      if (threat.winNow) immediateWins.push(move)
+      if (threat.winNow || threat.fours.length > 0 || threat.doubleThreat) forcingMoves.push(move)
+      if (threat.doubleThreat) sameMoveMultiThreats.push(move)
     }
     return { immediateWins, forcingMoves, sameMoveMultiThreats }
   }
   const side = knownSideCandidates
     ? {
-        immediateWins: knownSideCandidates.filter((move) => move.immediateWin).map(({ row, col }) => ({ row, col })),
-        forcingMoves: knownSideCandidates.filter((move) => move.forcesReply || move.createsFourThree || move.createsDoubleThreat).map(({ row, col }) => ({ row, col })),
-        sameMoveMultiThreats: knownSideCandidates.filter((move) => move.createsFourThree || move.createsDoubleThreat).map(({ row, col }) => ({ row, col })),
+        immediateWins: knownSideCandidates
+          .filter((move) => move.immediateWin)
+          .map(({ row, col }) => ({ row, col })),
+        forcingMoves: knownSideCandidates
+          .filter((move) => move.forcesReply || move.createsFourThree || move.createsDoubleThreat)
+          .map(({ row, col }) => ({ row, col })),
+        sameMoveMultiThreats: knownSideCandidates
+          .filter((move) => move.createsFourThree || move.createsDoubleThreat)
+          .map(({ row, col }) => ({ row, col })),
       }
     : scanTacticalMoves(sideToMove)
   const opponentFacts = scanTacticalMoves(opponent)

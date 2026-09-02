@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { AIMove, Board } from '@/games/gomoku/types/gomoku'
+import { BOARD_SIZE, type AIMove, type Board } from '@/games/gomoku/types/gomoku'
 
 defineProps<{
   board: Board
@@ -15,8 +15,9 @@ const emit = defineEmits<{ place: [row: number, col: number] }>()
   <div
     class="board"
     :class="[`board-${displaySize ?? 'medium'}`, `palette-${palette ?? 'wood'}`]"
+    :style="{ '--board-size': BOARD_SIZE }"
     role="grid"
-    aria-label="15 × 15 五子棋棋盘"
+    :aria-label="`${BOARD_SIZE} × ${BOARD_SIZE} 五子棋棋盘`"
   >
     <template v-for="(line, row) in board" :key="row">
       <button
@@ -45,7 +46,7 @@ const emit = defineEmits<{ place: [row: number, col: number] }>()
   --board-grid: #75501f;
   --board-border: #77501f;
   display: grid;
-  grid-template-columns: repeat(15, var(--cell-size));
+  grid-template-columns: repeat(var(--board-size), var(--cell-size));
   width: fit-content;
   padding: calc(var(--cell-size) / 2);
   background: var(--board-background);

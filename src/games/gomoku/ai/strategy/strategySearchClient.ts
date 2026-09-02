@@ -1,9 +1,10 @@
 import type { ThreatSearchOptions, ThreatSearchResult } from '@/games/gomoku/ai/threatSearch'
-import type { StrategySearchRequest, StrategySearchResponse } from '@/games/gomoku/ai/strategy/strategySearch.worker'
+import type {
+  StrategySearchRequest,
+  StrategySearchResponse,
+} from '@/games/gomoku/ai/strategy/strategySearch.worker'
 import type { Board, Player } from '@/games/gomoku/types/gomoku'
-import { postWorkerData } from '@/workerData'
-
-let nextId = 1
+import { requestWorker } from '@/workerData'
 
 function executeThreatWorker(
   board: Board,
@@ -12,33 +13,38 @@ function executeThreatWorker(
   options: ThreatSearchOptions,
   signal: AbortSignal,
 ): Promise<ThreatSearchResult> {
-  const worker = new Worker(new URL('./strategySearch.worker.ts', import.meta.url), { type: 'module' })
-  const id = nextId++
-  return new Promise((resolve, reject) => {
-    const cleanup = () => { signal.removeEventListener('abort', abort); worker.terminate() }
-    const abort = () => { cleanup(); reject(new DOMException('威胁搜索已取消', 'AbortError')) }
-    if (signal.aborted) { abort(); return }
-    signal.addEventListener('abort', abort, { once: true })
-    worker.addEventListener('message', (event: MessageEvent<StrategySearchResponse>) => {
-      if (event.data.id !== id) return
-      cleanup()
-      if (event.data.ok) resolve(event.data.result)
-      else reject(new Error(event.data.error))
-    })
-    worker.addEventListener('error', () => { cleanup(); reject(new Error('威胁搜索 Worker 执行失败')) }, { once: true })
-    try {
-      postWorkerData(worker, { id, board, player, ...(move ? { move } : {}), options } satisfies StrategySearchRequest, '五子棋威胁搜索')
-    } catch (error) {
-      cleanup()
-      reject(error)
-    }
+  const request = {
+    board,
+    player,
+    ...(move ? { move } : {}),
+    options,
+  } satisfies Omit<StrategySearchRequest, 'id'>
+  return requestWorker<StrategySearchRequest, StrategySearchResponse>(
+    new URL('./strategySearch.worker.ts', import.meta.url),
+    request,
+    '五子棋威胁搜索',
+    signal,
+  ).then((response) => {
+    if (!response.ok) throw new Error(response.error)
+    return response.result
   })
 }
 
-export function searchForcedWinInWorker(board: Board, player: Player, options: ThreatSearchOptions, signal: AbortSignal) {
+export function searchForcedWinInWorker(
+  board: Board,
+  player: Player,
+  options: ThreatSearchOptions,
+  signal: AbortSignal,
+) {
   return executeThreatWorker(board, player, undefined, options, signal)
 }
 
-export function searchForcedWinFromMoveInWorker(board: Board, player: Player, move: { row: number; col: number }, options: ThreatSearchOptions, signal: AbortSignal) {
+export function searchForcedWinFromMoveInWorker(
+  board: Board,
+  player: Player,
+  move: { row: number; col: number },
+  options: ThreatSearchOptions,
+  signal: AbortSignal,
+) {
   return executeThreatWorker(board, player, move, options, signal)
 }

@@ -10,6 +10,7 @@ import gomokuSkill from './SKILL.md?raw'
 import { GOMOKU_AGENT_BUDGET, gomokuStrategyTools } from './agentConfig'
 import { gomokuAgentTransport } from './agentTransport'
 import type { GomokuAgentContext, GomokuStrategyDecision } from './strategyTypes'
+import { BOARD_SIZE } from '@/games/gomoku/types/gomoku'
 
 export interface GomokuAgentDecisionResult {
   decision: GomokuStrategyDecision
@@ -53,7 +54,7 @@ export function parseGomokuDecision(content: string): GomokuStrategyDecision {
     throw new AgentRuntimeError('invalid_final_move')
   const row = value.move.row as number
   const col = value.move.col as number
-  if (row < 0 || row >= 15 || col < 0 || col >= 15)
+  if (row < 0 || row >= BOARD_SIZE || col < 0 || col >= BOARD_SIZE)
     throw new AgentRuntimeError('invalid_final_move')
   const strategy =
     typeof value.strategy === 'string' &&
@@ -89,28 +90,31 @@ export function createGomokuFallback(
 ): GomokuStrategyDecision {
   const baselineBest = context.baselineSearch.candidates[0]
   const immediate = context.positionInspection.immediateWins[0]
-  const forcedAttack = context.baselineSearch.forcedMoveType === 'forcedWin' || context.baselineSearch.forcedMoveType === 'forcedTactical'
-    ? baselineBest
-    : undefined
-  const forcedDefense = context.baselineSearch.forcedMoveType === 'forcedBlock'
-    ? baselineBest
-    : undefined
+  const forcedAttack =
+    context.baselineSearch.forcedMoveType === 'forcedWin' ||
+    context.baselineSearch.forcedMoveType === 'forcedTactical'
+      ? baselineBest
+      : undefined
+  const forcedDefense =
+    context.baselineSearch.forcedMoveType === 'forcedBlock' ? baselineBest : undefined
   const defenses = context.positionInspection.mandatoryDefense.moves
-  const defense = defenses.length > 0
-    ? context.baselineSearch.candidates.find((candidate) =>
-        defenses.some((move) => move.row === candidate.row && move.col === candidate.col),
-      ) ?? defenses[0]
-    : undefined
+  const defense =
+    defenses.length > 0
+      ? (context.baselineSearch.candidates.find((candidate) =>
+          defenses.some((move) => move.row === candidate.row && move.col === candidate.col),
+        ) ?? defenses[0])
+      : undefined
   const best = immediate ?? forcedAttack ?? forcedDefense ?? defense ?? baselineBest
   if (!best) throw new Error('No local fallback candidate is available')
   return {
     row: best.row,
     col: best.col,
-    strategy: immediate || forcedAttack
-      ? 'forced_attack'
-      : forcedDefense || defense
-        ? 'mandatory_defense'
-        : 'positional',
+    strategy:
+      immediate || forcedAttack
+        ? 'forced_attack'
+        : forcedDefense || defense
+          ? 'mandatory_defense'
+          : 'positional',
     reason: 'AI 已改用本地搜索结果完成落子。',
     evidence: [`本地基准搜索回退：${reason}`],
   }

@@ -5,6 +5,7 @@ import type {
   ReviewPoint,
   SessionReviewHistorySummary,
 } from '@/games/gomoku/types/gomoku'
+import { postJson } from '@/ai/runtime/jsonTransport'
 
 const REVIEW_TIMEOUT_MS = 10_000
 
@@ -69,20 +70,12 @@ export async function requestGameReview(
   const abort = () => timeoutController.abort()
   signal?.addEventListener('abort', abort, { once: true })
   try {
-    const response = await fetch('/api/gomoku/review', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ gameResult, moves, reviewPoints, sessionHistory }),
-      signal: timeoutController.signal,
-    })
-    const data: unknown = await response.json().catch(() => null)
-    if (!response.ok) {
-      const error =
-        data && typeof data === 'object' && typeof (data as { error?: unknown }).error === 'string'
-          ? (data as { error: string }).error
-          : `DeepSeek 复盘请求失败（HTTP ${response.status}）`
-      throw new Error(error)
-    }
+    const data = await postJson(
+      '/api/gomoku/review',
+      { gameResult, moves, reviewPoints, sessionHistory },
+      'DeepSeek 复盘请求失败',
+      timeoutController.signal,
+    )
     if (!isGameReview(data)) throw new Error('DeepSeek 未返回有效的复盘内容')
     return sanitizeGameReview(data, reviewPoints)
   } finally {

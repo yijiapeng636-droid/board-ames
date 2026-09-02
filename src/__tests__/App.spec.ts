@@ -152,7 +152,7 @@ describe('App', () => {
       trace: {
         ...searchResult.trace,
         forcedMoveType: 'forcedTactical',
-        finalSource: 'forcedWinSearch',
+        finalSource: 'forcedTactical',
       },
     })
     const wrapper = mount(App)

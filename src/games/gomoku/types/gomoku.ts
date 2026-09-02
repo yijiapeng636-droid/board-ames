@@ -1,6 +1,8 @@
 import type { AgentFailureStage } from '@/ai/runtime/agentTypes'
 
 export const BOARD_SIZE = 15
+export const BOARD_LAST_INDEX = BOARD_SIZE - 1
+export const BOARD_CENTER = Math.floor(BOARD_SIZE / 2)
 
 export type Piece = 0 | 1 | 2
 export type Player = 1 | 2
@@ -83,13 +85,7 @@ export interface SearchMetrics {
 }
 
 export type DecisionSource =
-  | 'immediateWin'
-  | 'forcedBlock'
-  | 'forcedTactical'
-  | 'forcedWinSearch'
-  | 'search'
-  | 'agent'
-  | 'fallback'
+  'forcedWin' | 'forcedBlock' | 'forcedTactical' | 'search' | 'deepseek' | 'searchFallback'
 
 export interface GomokuDecisionTrace {
   aiPlayer: Player
@@ -236,16 +232,6 @@ export interface PositionExperienceMove {
 export interface PositionExperienceSummary {
   seen: number
   moves: PositionExperienceMove[]
-}
-
-export interface GameSnapshot {
-  boardSize: number
-  humanPlayer: 'black' | 'white'
-  aiPlayer: 'black' | 'white'
-  board: string[]
-  moves: Move[]
-  searchedCandidates: SearchedCandidate[]
-  sessionExperience?: PositionExperienceSummary
 }
 
 export type Board = Piece[][]

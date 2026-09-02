@@ -1,24 +1,20 @@
-import { SEARCH_CONFIG } from '@/games/gomoku/ai/searchConfig'
+import { PATTERN_SCORES, SEARCH_CONFIG } from '@/games/gomoku/ai/searchConfig'
 import {
   analyzeThreat,
   type ThreatDirectionPattern,
   type ThreatPatternName,
 } from '@/games/gomoku/ai/threatAnalysis'
-import { BOARD_SIZE, type AICandidate, type Board, type Player } from '@/games/gomoku/types/gomoku'
+import {
+  BOARD_CENTER,
+  BOARD_LAST_INDEX,
+  BOARD_SIZE,
+  type AICandidate,
+  type Board,
+  type Player,
+} from '@/games/gomoku/types/gomoku'
 
 export type PatternName = ThreatPatternName
 export type DirectionPattern = Pick<ThreatDirectionPattern, 'pattern' | 'length' | 'openEnds'>
-
-const PATTERN_SCORES: Record<PatternName, number> = {
-  five: 1_000_000,
-  openFour: 100_000,
-  closedFour: 30_000,
-  brokenFour: 30_000,
-  openThree: 8_000,
-  brokenThree: 8_000,
-  closedThree: 1_200,
-  openTwo: 400,
-}
 
 export function analyzeMovePatterns(
   board: Board,
@@ -27,11 +23,13 @@ export function analyzeMovePatterns(
   player: Player,
 ): DirectionPattern[] {
   if (board[row]?.[col] !== 0) return []
-  return analyzeThreat(board, { row, col }, player).directions.map(({ pattern, length, openEnds }) => ({
-    pattern,
-    length,
-    openEnds,
-  }))
+  return analyzeThreat(board, { row, col }, player).directions.map(
+    ({ pattern, length, openEnds }) => ({
+      pattern,
+      length,
+      openEnds,
+    }),
+  )
 }
 
 function summarizePatterns(patterns: DirectionPattern[]) {
@@ -39,9 +37,7 @@ function summarizePatterns(patterns: DirectionPattern[]) {
   const fourCount = names.filter((name) =>
     ['openFour', 'closedFour', 'brokenFour'].includes(name),
   ).length
-  const threeCount = names.filter((name) =>
-    ['openThree', 'brokenThree'].includes(name),
-  ).length
+  const threeCount = names.filter((name) => ['openThree', 'brokenThree'].includes(name)).length
   return {
     names,
     score: names.reduce((total, name) => total + PATTERN_SCORES[name], 0),
@@ -51,32 +47,37 @@ function summarizePatterns(patterns: DirectionPattern[]) {
 }
 
 export function getNearbyEmptyCells(board: Board) {
-  const occupied: Array<[number, number]> = []
+  const nearby = Array.from({ length: BOARD_SIZE }, () => Array<boolean>(BOARD_SIZE).fill(false))
+  let hasPiece = false
+  const radius = SEARCH_CONFIG.candidateRadius
   for (let row = 0; row < BOARD_SIZE; row += 1) {
     for (let col = 0; col < BOARD_SIZE; col += 1) {
-      if (board[row]?.[col]) occupied.push([row, col])
-    }
-  }
-  if (occupied.length === 0) return [{ row: 7, col: 7 }]
-
-  const cells = new Map<string, { row: number; col: number }>()
-  const radius = SEARCH_CONFIG.candidateRadius
-  for (const [pieceRow, pieceCol] of occupied) {
-    for (
-      let row = Math.max(0, pieceRow - radius);
-      row <= Math.min(14, pieceRow + radius);
-      row += 1
-    ) {
+      if (!board[row]?.[col]) continue
+      hasPiece = true
       for (
-        let col = Math.max(0, pieceCol - radius);
-        col <= Math.min(14, pieceCol + radius);
-        col += 1
+        let nearbyRow = Math.max(0, row - radius);
+        nearbyRow <= Math.min(BOARD_LAST_INDEX, row + radius);
+        nearbyRow += 1
       ) {
-        if (board[row]?.[col] === 0) cells.set(`${row}-${col}`, { row, col })
+        for (
+          let nearbyCol = Math.max(0, col - radius);
+          nearbyCol <= Math.min(BOARD_LAST_INDEX, col + radius);
+          nearbyCol += 1
+        ) {
+          nearby[nearbyRow]![nearbyCol] = true
+        }
       }
     }
   }
-  return [...cells.values()]
+  if (!hasPiece) return [{ row: BOARD_CENTER, col: BOARD_CENTER }]
+
+  const cells: Array<{ row: number; col: number }> = []
+  for (let row = 0; row < BOARD_SIZE; row += 1) {
+    for (let col = 0; col < BOARD_SIZE; col += 1) {
+      if (nearby[row]?.[col] && board[row]?.[col] === 0) cells.push({ row, col })
+    }
+  }
+  return cells
 }
 
 export function evaluateCandidate(
@@ -86,18 +87,10 @@ export function evaluateCandidate(
   player: Player,
 ): AICandidate {
   const opponent: Player = player === 1 ? 2 : 1
-  const attackThreat = analyzeThreat(
-    board,
-    { row, col },
-    player,
-    { includeDefenseSquares: false },
-  )
-  const defenseThreat = analyzeThreat(
-    board,
-    { row, col },
-    opponent,
-    { includeDefenseSquares: false },
-  )
+  const attackThreat = analyzeThreat(board, { row, col }, player, { includeDefenseSquares: false })
+  const defenseThreat = analyzeThreat(board, { row, col }, opponent, {
+    includeDefenseSquares: false,
+  })
   const attack = summarizePatterns(attackThreat.directions)
   const defense = summarizePatterns(defenseThreat.directions)
   const features = new Set<string>(attack.names)
@@ -112,7 +105,8 @@ export function evaluateCandidate(
         adjacentPieces += 1
     }
   }
-  const centerBonus = 14 - (Math.abs(row - 7) + Math.abs(col - 7))
+  const centerBonus =
+    BOARD_LAST_INDEX - (Math.abs(row - BOARD_CENTER) + Math.abs(col - BOARD_CENTER))
   const positionalScore = adjacentPieces * 25 + centerBonus
   let orderingScore = attack.score + defense.score * 1.15 + positionalScore
   if (attackThreat.doubleThreat) orderingScore += 120_000
@@ -179,9 +173,9 @@ export function generateCandidatePool(
     .sort(
       (left, right) =>
         right.orderingScore - left.orderingScore ||
-        Math.abs(left.row - 7) +
-          Math.abs(left.col - 7) -
-          (Math.abs(right.row - 7) + Math.abs(right.col - 7)) ||
+        Math.abs(left.row - BOARD_CENTER) +
+          Math.abs(left.col - BOARD_CENTER) -
+          (Math.abs(right.row - BOARD_CENTER) + Math.abs(right.col - BOARD_CENTER)) ||
         left.row - right.row ||
         left.col - right.col,
     )
@@ -191,21 +185,4 @@ export function generateCandidatePool(
     if (!selected.includes(candidate)) selected.push(candidate)
   }
   return selected
-}
-
-export function generateCandidates(board: Board, limit: number = 10): AICandidate[] {
-  return generateCandidatePool(board, 2, limit)
-}
-
-export function getForcedCandidate(candidates: AICandidate[]): AICandidate | null {
-  return (
-    candidates.find((candidate) => candidate.immediateWin) ??
-    candidates.find((candidate) => candidate.blocksImmediateWin) ??
-    null
-  )
-}
-
-export function findForcedTacticalMove(candidates: AICandidate[]): AICandidate | null {
-  // Strong patterns are search inputs until Threat Search proves every best defense loses.
-  return candidates.find((candidate) => candidate.immediateWin) ?? null
 }

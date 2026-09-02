@@ -199,26 +199,6 @@ async function forwardAgent(
   })
 }
 
-function buildMessages(payload: unknown) {
-  const request = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {}
-  const retry = typeof request.retryReason === 'string' ? request.retryReason : ''
-  const retryInstruction = retry
-    ? `\n上一次落点未通过本地校验，原因：${retry}。请避开该问题并重新选择。`
-    : ''
-
-  return [
-    {
-      role: 'system',
-      content:
-        '你是五子棋策略决策者，执棋颜色由 game.aiPlayer 指定。本地 TypeScript 引擎已完成规则检查、多步搜索和 Alpha-Beta 剪枝。请综合 game.searchedCandidates 中的 searchScore、staticScore、features、principalVariation，以及仅作弱参考的 sessionExperience。不得无理由忽略明显强制战术，只能选择 searchedCandidates 中的坐标。只输出 JSON，不要输出 Markdown。JSON 格式示例：{"row":7,"col":8,"reason":"简短说明"}。',
-    },
-    {
-      role: 'user',
-      content: `当前棋局 JSON：${JSON.stringify(request.game ?? null)}${retryInstruction}`,
-    },
-  ]
-}
-
 function buildReviewMessages(payload: unknown) {
   return [
     {
@@ -266,7 +246,7 @@ function buildXiangqiReviewMessages(payload: unknown) {
 async function forwardCompletion(
   response: ServerResponse,
   options: Required<ProxyOptions>,
-  messages: ReturnType<typeof buildMessages>,
+  messages: Array<{ role: string; content: string }>,
   maxTokens: number,
 ) {
   const upstream = await fetch(completionEndpoint(options.baseUrl), {
@@ -369,54 +349,6 @@ export function deepseekProxy(options: ProxyOptions): Plugin {
           sendJson(response, 502, {
             error: message.includes(options.apiKey) ? 'DeepSeek 异常复盘代理请求失败' : message,
           })
-        }
-      })
-      server.middlewares.use('/api/gomoku/move', async (request, response) => {
-        if (request.method !== 'POST') {
-          sendJson(response, 405, { error: '仅支持 POST 请求' })
-          return
-        }
-        if (!options.apiKey || !options.baseUrl || !options.model) {
-          sendJson(response, 503, { error: 'DeepSeek 本地配置不完整，请检查 .env.local' })
-          return
-        }
-
-        try {
-          const payload = await readJson(request)
-          const upstream = await fetch(completionEndpoint(options.baseUrl), {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${options.apiKey}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              model: options.model,
-              messages: buildMessages(payload),
-              thinking: { type: 'disabled' },
-              response_format: { type: 'json_object' },
-              max_tokens: 512,
-              stream: false,
-            }),
-            signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
-          })
-
-          if (!upstream.ok) {
-            sendJson(response, 502, { error: `DeepSeek 请求失败（HTTP ${upstream.status}）` })
-            return
-          }
-
-          const completion = (await upstream.json()) as {
-            choices?: Array<{ message?: { content?: unknown } }>
-          }
-          const content = completion.choices?.[0]?.message?.content
-          if (typeof content !== 'string' || content.trim() === '') {
-            throw new Error('DeepSeek 未返回有效内容')
-          }
-          sendJson(response, 200, JSON.parse(content) as unknown)
-        } catch (error) {
-          const message = error instanceof Error ? error.message : 'DeepSeek 代理发生未知错误'
-          const safeMessage = message.includes(options.apiKey) ? 'DeepSeek 代理请求失败' : message
-          sendJson(response, 502, { error: safeMessage })
         }
       })
       server.middlewares.use('/api/xiangqi/move', async (request, response) => {

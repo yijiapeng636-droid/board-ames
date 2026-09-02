@@ -1,68 +1,32 @@
-# AI 五子棋本地 Web MVP
+# AI 棋类练习器
 
-Vue 3 + TypeScript + Vite 的 localhost 技术验证版。玩家执黑，DeepSeek 执白；胜负与落点合法性始终由本地 TypeScript 代码判断。
+本项目是基于 Vue 3、TypeScript 和 Vite 的本地 Web 练习器，包含五子棋与中国象棋。规则、合法性、胜负和确定性搜索均在本地执行；DeepSeek 只在本地候选和规则事实范围内提供策略选择与中文讲解。
 
-当前 V2 棋力链路为：Web Worker 候选池与棋型分析 → Minimax + Alpha-Beta 多步搜索 → 会话级临时经验摘要 → DeepSeek 候选决策 → 本地 Validator。DeepSeek 不可用时会采用 `searchScore` 最高的本地搜索结果。
+## 当前架构
 
-会话经验仅保存在内存和 `sessionStorage`，跨 restart 和页面刷新保留，浏览器会话结束后失效；页面提供独立的“清空本次会话经验”按钮。
+- 五子棋：候选生成 → 棋型评估 → Threat Search → Minimax/Alpha-Beta → Strategy Agent → 本地安全门禁。
+- 中国象棋：合法着法 → 局面评估 → 搜索 → 重复棋例裁决 → DeepSeek 候选选择。
+- 计算任务：搜索、提示、复盘和局后分析运行在 Web Worker；公共 Worker 模块统一请求编号、数据克隆、取消和清理。
+- 历史记录：`data/gomoku.sqlite` 长期保存，IndexedDB 作为浏览器镜像与故障兜底。
+- 本地代理：Vite 服务端提供 `/api/gomoku/agent`、复盘接口和象棋接口，API Key 不进入浏览器 bundle。
 
 ## 本地运行
 
-1. 复制 `.env.example` 为 `.env.local`，填写已确认的 DeepSeek 配置。
-2. 执行 `npm install`。
-3. 执行 `npm run dev`。
+1. 复制 `.env.example` 为 `.env.local`，填写 DeepSeek 配置。
+2. 安装依赖：`npm install`。
+3. 启动项目：`npm run dev`。
+4. 打开终端输出的本地地址，默认是 `http://localhost:5173`。
 
-浏览器仅请求 `/api/deepseek`。API Key 由 Vite 开发服务器读取，不会进入 Vue 客户端 bundle。该代理仅用于 localhost 开发验证，不是生产部署方案。
+SQLite 使用 Node 内置的 `node:sqlite`，不需要额外安装数据库包。数据库默认位于 `data/gomoku.sqlite`；可通过 `.env.local` 的 `GAME_DB_PATH` 修改位置。
 
-This template should help get you started developing with Vue 3 in Vite.
-
-## Recommended IDE Setup
-
-[VS Code](https://code.visualstudio.com/) + [Vue (Official)](https://marketplace.visualstudio.com/items?itemName=Vue.volar) (and disable Vetur).
-
-## Recommended Browser Setup
-
-- Chromium-based browsers (Chrome, Edge, Brave, etc.):
-  - [Vue.js devtools](https://chromewebstore.google.com/detail/vuejs-devtools/nhdogjmejiglipccpnnnanhbledajbpd)
-  - [Turn on Custom Object Formatter in Chrome DevTools](http://bit.ly/object-formatters)
-- Firefox:
-  - [Vue.js devtools](https://addons.mozilla.org/en-US/firefox/addon/vue-js-devtools/)
-  - [Turn on Custom Object Formatter in Firefox DevTools](https://fxdx.dev/firefox-devtools-custom-object-formatters/)
-
-## Type Support for `.vue` Imports in TS
-
-TypeScript cannot handle type information for `.vue` imports by default, so we replace the `tsc` CLI with `vue-tsc` for type checking. In editors, we need [Volar](https://marketplace.visualstudio.com/items?itemName=Vue.volar) to make the TypeScript language service aware of `.vue` types.
-
-## Customize configuration
-
-See [Vite Configuration Reference](https://vite.dev/config/).
-
-## Project Setup
-
-```sh
-npm install
-```
-
-### Compile and Hot-Reload for Development
+## 常用命令
 
 ```sh
 npm run dev
-```
-
-### Type-Check, Compile and Minify for Production
-
-```sh
+npm run type-check
 npm run build
-```
-
-### Run Unit Tests with [Vitest](https://vitest.dev/)
-
-```sh
 npm run test:unit
-```
-
-### Lint with [ESLint](https://eslint.org/)
-
-```sh
 npm run lint
 ```
+
+这是 localhost 技术探索版本，不是生产部署方案。

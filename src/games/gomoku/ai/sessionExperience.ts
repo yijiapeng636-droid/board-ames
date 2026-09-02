@@ -1,7 +1,10 @@
 import { analyzeAgentPostmortemInWorker } from '@/games/gomoku/ai/agentPostmortemClient'
 import type { AgentPostmortemFinding } from '@/games/gomoku/ai/agentPostmortem'
+import { BOARD_SIZE } from '@/games/gomoku/types/gomoku'
+import { postJson } from '@/ai/runtime/jsonTransport'
 import type {
   Board,
+  DecisionSource,
   GameResult,
   GomokuAIDiagnostic,
   Move,
@@ -13,9 +16,6 @@ import type {
 } from '@/games/gomoku/types/gomoku'
 
 export const SESSION_EXPERIENCE_KEY = 'gomoku:session-experience:v2'
-
-export type AIDecisionSource =
-  'forcedWin' | 'forcedBlock' | 'forcedTactical' | 'deepseek' | 'searchFallback'
 
 export interface GameHistoryMove extends Move {
   id: string
@@ -150,6 +150,8 @@ export function createGameHistoryService({
 }: GameHistoryServiceOptions) {
   let games: GameHistoryRecord[] = []
   let writes = Promise.resolve()
+  let writeScheduled = false
+  let dirty = false
 
   const sanitize = (message: string) =>
     message
@@ -158,7 +160,21 @@ export function createGameHistoryService({
       .replace(/\bsk-[\w-]+/giu, '[redacted]')
 
   const persist = () => {
-    writes = writes.then(() => storage.save(structuredClone(games))).catch(() => undefined)
+    dirty = true
+    if (writeScheduled) return
+    writeScheduled = true
+    writes = writes
+      .then(async () => {
+        do {
+          dirty = false
+          await storage.save(structuredClone(games))
+        } while (dirty)
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        writeScheduled = false
+        if (dirty) persist()
+      })
   }
 
   const reviewedAnomalyIds = (game: GameHistoryRecord) => {
@@ -283,7 +299,7 @@ export function createGameHistoryService({
         startedAt: now(),
         humanPlayer: input.humanPlayer,
         aiPlayer: input.aiPlayer,
-        boardSize: 15,
+        boardSize: BOARD_SIZE,
         moves: [],
         aiDecisions: [],
         aiDiagnostics: [],
@@ -453,7 +469,7 @@ export interface AIDecisionRecord {
   searchScore?: number
   localBestMove?: { row: number; col: number }
   localBestScore?: number
-  source: AIDecisionSource
+  source: DecisionSource
 }
 
 export type SessionGameRecord = GameHistoryRecord
@@ -635,7 +651,7 @@ function legacySessionGames(): GameHistoryRecord[] {
           ...(result ? { result } : { interruptionReason: 'legacy-incomplete' }),
           humanPlayer: aiPlayer === 1 ? 2 : 1,
           aiPlayer,
-          boardSize: 15,
+          boardSize: BOARD_SIZE,
           legacy: true,
           incomplete: true,
           moves: legacy.moves.map((move, index) => ({
@@ -658,10 +674,9 @@ function legacySessionGames(): GameHistoryRecord[] {
 }
 
 async function requestGameAnomalyReview(game: GameHistoryRecord): Promise<GameAnomalyReview> {
-  const response = await fetch('/api/gomoku/anomaly-review', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+  const data = await postJson(
+    '/api/gomoku/anomaly-review',
+    {
       game: {
         id: game.id,
         status: game.status,
@@ -669,11 +684,10 @@ async function requestGameAnomalyReview(game: GameHistoryRecord): Promise<GameAn
         anomalies: game.anomalies,
         aiDiagnostics: game.aiDiagnostics,
       },
-    }),
-    signal: AbortSignal.timeout(10_000),
-  })
-  const data: unknown = await response.json().catch(() => null)
-  if (!response.ok) throw new Error(`异常复盘请求失败（HTTP ${response.status}）`)
+    },
+    '异常复盘请求失败',
+    AbortSignal.timeout(10_000),
+  )
   if (!data || typeof data !== 'object') throw new Error('异常复盘格式无效')
   const review = data as Partial<GameAnomalyReview>
   if (
@@ -821,7 +835,7 @@ export function decisionFromCandidate(
   positionKey: string,
   selected: SearchedCandidate,
   localBest: SearchedCandidate,
-  source: AIDecisionSource,
+  source: DecisionSource,
 ): AIDecisionRecord {
   return {
     positionKey,
